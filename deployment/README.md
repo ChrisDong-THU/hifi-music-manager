@@ -17,8 +17,14 @@ Linux 目标设备需要：
 
 ## 首次准备
 
-1. 将 MinimServer 官方程序安装到设备 `~/hifi/minimserver/`，运行厂商 `bin/startc` 完成许可和初始配置，正常退出。不要复制其他设备的数据目录或身份。
-2. 如使用独立 Java，配置 `java_home`。MinimServer 的内容目录使用项目监督器维护的 `~/hifi/music` 链接，不另启厂商自动启动方式。
+1. 先初始化音乐盘。可在运行管理 Web 的电脑上选择该盘；也可从离线包解出对应架构的 `hifi-manager`，复制到设备临时目录，以普通用户前台运行：
+
+   ```bash
+   ./hifi-manager -home ~/hifi -listen 127.0.0.1:8787 -data-disks
+   ```
+
+   通过 SSH 本地转发访问设置（例如 `ssh -L 18787:127.0.0.1:8787 music-server`），在 <http://127.0.0.1:18787> 确认初始化并选盘，再用 Ctrl+C 停止这个临时管理实例。不要手动创建未带盘标识的项目子目录。
+2. 创建指向已初始化音乐目录的 `~/hifi/music` 符号链接；已有入口应先检查，不覆盖普通目录。将 MinimServer 官方程序安装到 `~/hifi/minimserver/`，运行厂商 `bin/startc`，将内容目录设为 `~/hifi/music` 的完整绝对路径，完成许可和初始配置后正常退出。不要复制其他设备的数据目录或身份，也不另启厂商自动启动方式。如使用独立 Java，配置 `java_home`。
 3. 从 [example.json](../config/devices/example.json) 复制本机设备配置，例如 `config/devices/local.json`：
 
 ```json
