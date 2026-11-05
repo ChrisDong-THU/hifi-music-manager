@@ -70,4 +70,4 @@ python deployment/deploy.py --device config/devices/local.json --apply
 - [贡献约定](CONTRIBUTING.md) · [安全说明](SECURITY.md)
 - [第三方来源与许可](NOTICE.md)
 
-项目自有代码许可见 [LICENSE](LICENSE)；第三方代码、字体、图标及音源分析代码保留各自许可。
+项目暂未指定自有代码许可；第三方代码、字体、图标及音源分析代码保留各自许可。
