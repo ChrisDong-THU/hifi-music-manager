@@ -1,0 +1,53 @@
+.stroke-icon-slot {
+  --stroke-icon-enter-transform: rotate(-18deg) scale(0.85);
+  --stroke-icon-leave-transform: rotate(18deg) scale(0.85);
+  display: inline-grid;
+  position: relative;
+  flex-shrink: 0;
+}
+.stroke-icon-slot[data-motion="subtle"] {
+  --stroke-icon-enter-transform: translateY(1px) rotate(-6deg) scale(0.94);
+  --stroke-icon-leave-transform: translateY(-1px) rotate(6deg) scale(0.94);
+}
+.stroke-icon-layer {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transform-origin: center;
+  pointer-events: none;
+}
+.stroke-icon-content {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  transform-origin: center;
+}
+/* Keep the entering transform alive on interruption; the outer layer exits. */
+.stroke-icon-content[data-entering="true"] {
+  animation: stroke-icon-enter var(--stroke-icon-enter-duration)
+    var(--stroke-icon-enter-easing) both;
+}
+.stroke-icon-layer[data-leaving="true"] {
+  animation: stroke-icon-leave var(--stroke-icon-leave-duration)
+    var(--stroke-icon-leave-easing) both;
+}
+@keyframes stroke-icon-enter {
+  from { opacity: 0; transform: var(--stroke-icon-enter-transform); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes stroke-icon-leave {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: var(--stroke-icon-leave-transform); }
+}
+.stroke-icon-slot[data-reduced-motion="true"] .stroke-icon-content,
+.stroke-icon-slot[data-reduced-motion="true"] .stroke-icon-layer {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stroke-icon-content,
+  .stroke-icon-layer { animation: none; }
+  .stroke-icon-layer[data-leaving="true"] { display: none; }
+}

@@ -1,0 +1,91 @@
+.notice-icon {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  color: var(--notice-accent);
+  transition: color 360ms ease;
+}
+.notice-icon-ring {
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+}
+.notice-icon-wave {
+  transform-origin: 12px 12px;
+  transition:
+    opacity 160ms ease,
+    transform 240ms cubic-bezier(0.4, 0, 0.6, 1);
+}
+.notice-icon-wave path {
+  transform-origin: 12px 12px;
+  animation: notice-icon-wave 900ms ease-in-out infinite alternate;
+}
+.notice-icon-wave path:nth-child(2) {
+  animation-delay: -150ms;
+}
+.notice-icon-wave path:nth-child(3) {
+  animation-delay: -300ms;
+}
+.notice-icon-wave path:nth-child(4) {
+  animation-delay: -450ms;
+}
+.notice-icon-wave path:nth-child(5) {
+  animation-delay: -600ms;
+}
+.notice-icon-wave path:nth-child(6) {
+  animation-delay: -750ms;
+}
+.notice-icon-check {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+}
+.notice-status-icon[data-status="success"] .notice-icon-ring {
+  animation: notice-icon-draw-ring 420ms cubic-bezier(0.2, 0.7, 0.3, 1) 60ms
+    both;
+}
+.notice-status-icon[data-status="success"] .notice-icon-wave {
+  opacity: 0;
+  transform: scaleY(0);
+}
+.notice-status-icon[data-status="success"] .notice-icon-check {
+  animation: notice-icon-check 340ms cubic-bezier(0.16, 1, 0.3, 1) 180ms both;
+}
+@keyframes notice-icon-draw-ring {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes notice-icon-wave {
+  from {
+    transform: scaleY(0.55);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+@keyframes notice-icon-check {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .notice-icon-wave path,
+  .notice-status-icon[data-status="success"] .notice-icon-ring,
+  .notice-status-icon[data-status="success"] .notice-icon-check {
+    animation: none;
+  }
+  .notice-icon-ring,
+  .notice-icon-wave,
+  .notice-icon {
+    transition: none;
+  }
+  .notice-status-icon[data-status="success"] .notice-icon-check,
+  .notice-status-icon[data-status="success"] .notice-icon-ring {
+    stroke-dashoffset: 0;
+  }
+}

@@ -1,0 +1,45 @@
+HiFi music repository manager
+
+Design and workflow reference:
+  metasauce/beets-flask, source snapshot 00b246d
+  https://github.com/metasauce/beets-flask
+  Copyright (c) 2024 F. Paul Spitzner, Sebastian B. Mohr
+  MIT. Theme, global stylesheet and page wrapper are adapted from the
+  upstream source. Navigation, accent card headers, statistic tiles,
+  inbox tree, search and player layouts reference upstream components.
+  The default record-cover SVG is project-authored. See UPSTREAM.md.
+
+Frontend dependencies:
+  Roboto variable font (Fontsource package): SIL Open Font License 1.1
+  React / React DOM, MUI, Emotion: MIT
+  Lucide React: ISC (Lucide), MIT (Feather-derived icons)
+  Locked production dependency license texts, including transitive
+  dependencies, are retained in licenses/frontend.txt.
+
+Music organization reference:
+  beetbox/beets
+  https://github.com/beetbox/beets
+  No beets Python runtime or source code is included.
+
+Go dependencies (exact pins in go.mod and go.sum):
+  github.com/mewkiz/flac: streaming integer FLAC decoding, Unlicense
+  github.com/icza/bitio: bit stream I/O, Apache-2.0
+  github.com/mewkiz/pkg, github.com/mewpkg/term: decoder support, Unlicense
+  github.com/dhowden/tag: metadata reading, BSD-3-Clause
+  github.com/bogem/id3v2/v2: ID3 writing, MIT
+  go.etcd.io/bbolt: local embedded storage, MIT
+  golang.org/x/sys: platform support, BSD-3-Clause
+  golang.org/x/text: text encodings, BSD-3-Clause
+
+Full notices are retained in licenses/.
+
+Audio source quality analysis:
+  craft-and-code/FlacCompagnon, commit
+  7a382761a2054e07d3572736101e64560ef09057
+  https://github.com/craft-and-code/FlacCompagnon
+  FlacCompagnon contributors. MPL-2.0 for the analysis core.
+  Integer precision / quantization-grid and spectral-bandwidth detection
+  are adapted to Go in internal/audioquality/{bitdepth,spectrum,analysis}.go.
+  See internal/audioquality/SOURCE.md for algorithm changes and limits.
+  The adapted source and complete license are supplied as
+  licenses/flaccompagnon-source.txt and licenses/flaccompagnon-MPL-2.0.txt.

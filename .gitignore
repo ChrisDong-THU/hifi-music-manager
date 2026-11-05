@@ -1,0 +1,32 @@
+# Local tools, builds, runtime data and private configuration
+/downloads/
+/diagnostics/
+/secrets/
+/config/devices/*.json
+!/config/devices/example.json
+/config/hifi-music.json
+*.db
+*.db-*
+*.log
+*.pid
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies and reproducible build output
+**/node_modules/
+/manager-service/web/
+/manager-service/*.exe
+/manager-service/*.test
+/music-service/*.exe
+/music-service/*.test
+__pycache__/
+*.py[cod]
+coverage/
+coverage.out
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

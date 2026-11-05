@@ -1,0 +1,32 @@
+{
+  "name": "hifi-music-nano-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deps:check": "node scripts/dependencies.mjs",
+    "build": "tsc --noEmit && node scripts/notices.mjs && vite build",
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@emotion/react": "11.14.0",
+    "@emotion/styled": "11.14.1",
+    "@fontsource-variable/roboto": "5.3.0",
+    "@fontsource/bodoni-moda": "5.3.0",
+    "@mui/material": "7.3.6",
+    "lucide-react": "0.546.0",
+    "react": "19.2.1",
+    "react-dom": "19.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.2",
+    "@types/react": "19.2.1",
+    "@types/react-dom": "19.2.1",
+    "@vitejs/plugin-react": "5.1.2",
+    "typescript": "5.9.3",
+    "vite": "7.3.7"
+  },
+  "engines": {
+    "node": ">=22.17"
+  }
+}

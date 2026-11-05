@@ -1,0 +1,10 @@
+{
+  "ssh": "music-server",
+  "profile": {
+    "root": "~/hifi",
+    "volume": "/media/music-disk",
+    "name": "hifi-music",
+    "manage_minim": true,
+    "manage_bubble": false
+  }
+}

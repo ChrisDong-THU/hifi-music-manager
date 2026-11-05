@@ -1,0 +1,10 @@
+Linux USB supervision and UPnP presentation use the Go standard library.
+The shared Windows storage implementation uses golang.org/x/sys/windows,
+Copyright 2009 The Go Authors, BSD-3-Clause.
+License: licenses/golang-x-sys-BSD.txt.
+The UPnP presentation is project code. The icon geometry is preserved unchanged;
+only its tint is adapted.
+Google Material Design Icons: Apache-2.0, source commit
+10ecc14790612ca8fd164e3f4ffe9c16fc50d5b7.
+https://github.com/google/material-design-icons
+License: licenses/google-material-icons-Apache-2.0.txt.

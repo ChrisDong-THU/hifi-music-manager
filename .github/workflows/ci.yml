@@ -1,0 +1,75 @@
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            manager-service/go.sum
+            music-service/go.sum
+            shared-library/go.sum
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: manager-service/frontend/package-lock.json
+      - name: Frontend
+        shell: bash
+        run: |
+          npm --prefix manager-service/frontend ci
+          npm --prefix manager-service/frontend test
+          npm --prefix manager-service/frontend run build
+      - name: Go tests and vet
+        shell: bash
+        run: |
+          set -euo pipefail
+          for module in shared-library manager-service music-service; do
+            (cd "$module" && go vet ./... && go test -count=1 -timeout=180s ./...)
+          done
+      - name: Deployment and local lifecycle tests
+        shell: bash
+        run: |
+          python -B -m unittest discover -s deployment -p 'test_*.py'
+          python -B -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Race detection
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for module in shared-library manager-service music-service; do
+            (cd "$module" && go test -race -count=1 -timeout=180s ./...)
+          done
+      - name: ARM64 cross-build
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: '0'
+        run: |
+          (cd manager-service && go build -trimpath -o ../manager-arm64 .)
+          (cd music-service && go build -trimpath -o ../music-arm64 .)
