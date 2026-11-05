@@ -41,7 +41,7 @@ go test -count=1 ./...
 go test -race ./...
 ```
 
-竞态检测需要 C 编译器。Go 测试前应生成管理前端和内嵌许可。平台专属测试在其他系统明确跳过；CI 同时检查 Windows 与 Linux，Linux 上执行竞态检测。
+竞态检测需要 C 编译器。Go 测试前应生成管理前端和内嵌许可。请在 Windows 和 Linux 上分别运行平台专属测试。
 
 ## 构建
 
