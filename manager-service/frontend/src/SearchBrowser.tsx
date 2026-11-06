@@ -9,6 +9,7 @@ import {
   InputAdornment,
   TextField,
   Typography,
+  useMediaQuery,
 } from "@mui/material";
 import {
   AudioLines,
@@ -28,6 +29,7 @@ import { Cover } from "./Cover";
 import { HiResBadge } from "./HiResBadge";
 import { Empty, IconAction, LoadError } from "./components";
 import { ArtistPortrait } from "./ArtistPortrait";
+import { useContentRelay } from "./useContentRelay";
 
 export type SearchStage = "artists" | "albums" | "tracks" | "details";
 const stages = [
@@ -58,7 +60,7 @@ function SearchPane({
       className={`search-pane search-pane-${stage}`}
       data-active={active === stage}
     >
-      <Box className="search-pane-header">
+      <Box className="search-pane-header" data-relay-beat="2">
         <Box className="search-pane-icon">{heading.icon}</Box>
         <Typography component="h2" variant="body2" fontWeight={500}>
           {heading.title}
@@ -69,8 +71,8 @@ function SearchPane({
           </Typography>
         ) : null}
       </Box>
-      <Box className="search-pane-body">{children}</Box>
-      {footer ? <Box className="search-pane-footer">{footer}</Box> : null}
+      <Box className="search-pane-body" data-relay-beat="3">{children}</Box>
+      {footer ? <Box className="search-pane-footer" data-relay-beat="4">{footer}</Box> : null}
     </Card>
   );
 }
@@ -123,6 +125,8 @@ export function SearchBrowser({
   onRetry: () => void;
 }) {
   const [focusPulse, setFocusPulse] = useState(0);
+  const singlePane = useMediaQuery("(max-width: 1023px)");
+  const paneRelay = useContentRelay(singlePane ? stage : null, { onMount: false });
   const activeAlbum = albums.find((album) => album.key === albumFilter);
   return (
     <Box
@@ -144,7 +148,7 @@ export function SearchBrowser({
       })}
     >
       <LoadError error={error} retry={onRetry} />
-      <Box className="search-toolbar">
+      <Box className="search-toolbar" data-relay-beat="1">
         <Box className="search-query-shell">
           <TextField
             className="search-query-field"
@@ -218,7 +222,7 @@ export function SearchBrowser({
           </Box>
         ) : null}
       </Box>
-      <Box className="search-stage-nav" role="group" aria-label="搜索分类">
+      <Box className="search-stage-nav" data-relay-beat="1" role="group" aria-label="搜索分类">
         {stages.map((item) => (
           <ButtonBase
             key={item.id}
@@ -230,7 +234,7 @@ export function SearchBrowser({
           </ButtonBase>
         ))}
       </Box>
-      <Box className="search-panes" aria-busy={loading}>
+      <Box ref={paneRelay} className="search-panes" aria-busy={loading}>
         <SearchPane stage="artists" active={stage} count={artists.length}>
           <ButtonBase
             className="search-all-row"

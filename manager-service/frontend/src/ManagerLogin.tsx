@@ -12,6 +12,7 @@ import {
 import { apiFetch, jsonResponse } from "./http-client";
 import { navigate, useRoute } from "./routing";
 import ThemeProvider from "./upstream/theme";
+import { useContentRelay } from "./useContentRelay";
 
 type AuthStatus = {
   authenticated: boolean;
@@ -30,6 +31,8 @@ export function ManagerGate({
   const [status, setStatus] = useState<AuthStatus | null>(null);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
+  const authView = status && !status.authenticated ? (registering ? "register" : "login") : null;
+  const authRelay = useContentRelay(authView, { direction: registering ? 1 : -1 });
 
   const applyStatus = useCallback((next: AuthStatus) => {
     const hash = location.hash.split("?")[0];
@@ -72,6 +75,7 @@ export function ManagerGate({
           }}
         >
           <Card
+            ref={authRelay}
             aria-labelledby="manager-login-title"
             sx={{
               alignSelf: "center",
@@ -81,7 +85,11 @@ export function ManagerGate({
               p: { mobile: 3, tablet: 4 },
             }}
           >
-            <Stack spacing={0.75} sx={{ alignItems: "center", textAlign: "center", mb: 3.5 }}>
+            <Stack
+              data-relay-beat="0"
+              spacing={0.75}
+              sx={{ alignItems: "center", textAlign: "center", mb: 3.5 }}
+            >
               <Typography component="p" sx={{ fontSize: "clamp(1.45rem, 5.8vw, 2rem)", lineHeight: 1.12 }}>
                 <span className="app-wordmark">hifi-music-nano</span>
               </Typography>
@@ -172,6 +180,7 @@ function LoginForm({ registering, onSuccess }: { registering: boolean; onSuccess
     >
       {registering && (
         <TextField
+          data-relay-beat="1"
           id="manager-invite-code"
           name="inviteCode"
           label="邀请码"
@@ -183,6 +192,7 @@ function LoginForm({ registering, onSuccess }: { registering: boolean; onSuccess
         />
       )}
       <TextField
+        data-relay-beat="2"
         id="manager-username"
         name="username"
         label="账号"
@@ -192,6 +202,7 @@ function LoginForm({ registering, onSuccess }: { registering: boolean; onSuccess
         slotProps={{ htmlInput: { maxLength: 64, autoCapitalize: "none", spellCheck: false } }}
       />
       <TextField
+        data-relay-beat="3"
         key={failedLogins}
         id="manager-password"
         name="password"
@@ -216,6 +227,7 @@ function LoginForm({ registering, onSuccess }: { registering: boolean; onSuccess
       />
       {registering && (
         <TextField
+          data-relay-beat="4"
           id="manager-confirm-password"
           name="confirmPassword"
           label="确认密码"
@@ -228,6 +240,7 @@ function LoginForm({ registering, onSuccess }: { registering: boolean; onSuccess
       )}
       {error && <Alert severity="error">{error}</Alert>}
       <Stack
+        data-relay-beat="5"
         direction="row"
         spacing={1.5}
         justifyContent="center"

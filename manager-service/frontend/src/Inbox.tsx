@@ -194,6 +194,7 @@ export function InboxPage({
         >
           <AccentHeader
             className="panel-header"
+            data-relay-beat="1"
             icon={<InboxIcon size={24} />}
             color="secondary.main"
             dividerPos="70%"
@@ -243,6 +244,7 @@ export function InboxPage({
           </AccentHeader>
           <Box
             className="panel-header"
+            data-relay-beat="1"
             sx={{ px: { mobile: 0.5, tablet: 1 }, pt: 1.5, mt: 1 }}
           >
             <Box
@@ -289,6 +291,7 @@ export function InboxPage({
             </Box>
           </Box>
           <ScrollableCardContent
+            relayBeat={2}
             className="inbox-drafts-list"
             label="上传条目列表"
           >
@@ -516,6 +519,7 @@ export function InboxPage({
           <Divider sx={{ mx: 1 }} />
           <CardActions
             className="inbox-drafts-actions"
+            data-relay-beat="3"
             sx={{
               display: "flex",
               pt: 2,

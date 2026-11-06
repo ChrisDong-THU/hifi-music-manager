@@ -6,12 +6,14 @@ export function ScrollableCardContent({
   label,
   id,
   hidden,
+  relayBeat,
   className = "",
   children,
 }: {
   label: string;
   id?: string;
   hidden?: boolean;
+  relayBeat?: number;
   className?: string;
   children: ReactNode;
 }) {
@@ -19,6 +21,7 @@ export function ScrollableCardContent({
     <CardContent
       id={id}
       hidden={hidden}
+      data-relay-beat={relayBeat}
       className={`panel-scroll ${className}`}
       role="region"
       aria-label={label}

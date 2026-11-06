@@ -291,6 +291,7 @@ export function UploadArea({
     <Box
       component="section"
       className="inbox-upload-area"
+      data-relay-beat="4"
       aria-label="音乐上传"
       aria-busy={upload.isBusy}
       data-dragging={dragging}

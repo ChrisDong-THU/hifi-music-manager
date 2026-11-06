@@ -105,6 +105,7 @@ export function PageTitle({
 }) {
   return (
     <Box
+      data-relay-beat="0"
       sx={{
         display: "grid",
         gridTemplateColumns: "1fr auto 1fr",

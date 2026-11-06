@@ -22,6 +22,7 @@ import { TrackEditor } from "./TrackEditor";
 import { useProgressNotice } from "./ProgressNotice";
 import { useLibraryPage } from "./useLibraryPage";
 import { useConditionalQuery } from "./useConditionalQuery";
+import { useContentRelay } from "./useContentRelay";
 
 const librarySortModes = [
   { value: "recent", label: "最近加入" },
@@ -64,6 +65,7 @@ export const LibraryPage = memo(function LibraryPage({
   const [albumEdit, setAlbumEdit] = useState<Album | null>(null);
   const [sortMode, setSortMode] = useState(readLibrarySortMode);
   const [grouping, setGrouping] = useState<"albums" | "artists">("albums");
+  const groupingRelay = useContentRelay(search ? null : grouping, { onMount: false });
   const listID = useId();
   const [query, setQuery] = useState(""),
     deferredQuery = useDeferredValue(query),
@@ -125,11 +127,6 @@ export const LibraryPage = memo(function LibraryPage({
   }
   const details = tracks.find((track) => track.id === detailID) || null;
   useProgressNotice(loading, search ? "搜索曲库" : "加载曲库");
-  const chooseAlbum = (album: Album) => {
-    setAlbumFilter(album.key);
-    setDetailID(null);
-    setStage("tracks");
-  };
   const loadMore = (kind: "tracks" | "albums") =>
     kind === "tracks" ? trackPage.loadMore() : albumPage.loadMore();
   function inlineAlbumRows(list: Album[], showEditActions = true) {
@@ -174,7 +171,11 @@ export const LibraryPage = memo(function LibraryPage({
             setDetailID(null);
             setStage("albums");
           }}
-          onAlbum={chooseAlbum}
+          onAlbum={(album) => {
+            setAlbumFilter(album.key);
+            setDetailID(null);
+            setStage("tracks");
+          }}
           onAllAlbums={() => {
             setAlbumFilter("");
             setDetailID(null);
@@ -227,6 +228,7 @@ export const LibraryPage = memo(function LibraryPage({
         </Box>
       ) : null}
       <Card
+        ref={groupingRelay}
         className="library-panel scroll-panel"
         component="section"
         aria-label="曲库"
@@ -235,7 +237,7 @@ export const LibraryPage = memo(function LibraryPage({
           width: "100%",
         }}
       >
-        <Box className="panel-header">
+        <Box className="panel-header" data-relay-beat="1">
           <DirectoryHeader
             icon={
               grouping === "albums" ? (
@@ -275,6 +277,7 @@ export const LibraryPage = memo(function LibraryPage({
           />
         </Box>
         <ScrollableCardContent
+          relayBeat={2}
           className="library-panel-scroll"
           id={`${listID}-albums`}
           hidden={grouping !== "albums"}
@@ -306,6 +309,7 @@ export const LibraryPage = memo(function LibraryPage({
           ) : null}
         </ScrollableCardContent>
         <ScrollableCardContent
+          relayBeat={2}
           className="library-panel-scroll"
           id={`${listID}-artists`}
           hidden={grouping !== "artists"}

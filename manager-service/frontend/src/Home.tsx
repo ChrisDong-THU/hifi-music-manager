@@ -117,6 +117,7 @@ export function HomePage() {
       <Box className="home-workspace">
         <Card
           className="home-music-card"
+          data-relay-beat="1"
           component="section"
           aria-label="我的音乐"
           aria-busy={scanning}

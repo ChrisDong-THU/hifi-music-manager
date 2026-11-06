@@ -174,7 +174,7 @@ function PreviewPage({ batch }: { batch: Draft }) {
       />
       <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
         {error ? <Alert severity="error">{error}</Alert> : null}
-        <Card sx={{ p: { mobile: 1, tablet: 2 } }}>
+        <Card data-relay-beat="1" sx={{ p: { mobile: 1, tablet: 2 } }}>
           <SectionHeader
             icon={<Folder size={24} />}
             title={draftTitle(batch)}
@@ -287,7 +287,7 @@ function PreviewPage({ batch }: { batch: Draft }) {
             ) : null}
           </CardContent>
         </Card>
-        <Card sx={{ p: { mobile: 1, tablet: 2 } }}>
+        <Card data-relay-beat="2" sx={{ p: { mobile: 1, tablet: 2 } }}>
           <SectionHeader
             icon={<AudioLines size={24} />}
             title="曲目"

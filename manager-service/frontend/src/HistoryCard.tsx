@@ -172,6 +172,7 @@ export function HistoryCard() {
   if (!state) return null;
   return (
     <Card
+      data-relay-beat="2"
       className="home-history-card scroll-panel"
       component="section"
       aria-label="操作记录"

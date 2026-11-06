@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Alert, Box } from "@mui/material";
 import { useAppActions, useAppState, useLibraryState } from "./api";
 import { useRoute } from "./routing";
@@ -13,6 +13,7 @@ import { LibraryPage } from "./Library";
 import type { Playback } from "./types";
 import { NavBar } from "./upstream/NavBar";
 import { PageWrapper } from "./upstream/page";
+import { useContentRelay } from "./useContentRelay";
 
 export function App() {
   const { session } = useLibraryState();
@@ -26,6 +27,10 @@ function DiskApp() {
   const { notify } = useAppActions();
   useProgressNotice(!state && !error, "加载资源");
   const { path, params } = useRoute();
+  const draftID = path === "inbox" ? params.get("draft") : null;
+  const pageRelay = useContentRelay(
+    state && path !== "history" ? JSON.stringify([path, draftID]) : null,
+  );
   const upload = useUpload();
   const [playback, setPlayback] = useState<Playback | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -41,13 +46,13 @@ function DiskApp() {
     [playback, playing, togglePlayback],
   );
   const scroll = useRef<HTMLDivElement>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (path === "history") {
       location.replace("#home");
       return;
     }
     scroll.current?.scrollTo({ top: 0 });
-  }, [path, params.get("draft")]);
+  }, [path, draftID]);
   let content;
   if (!state)
     content = (
@@ -56,10 +61,7 @@ function DiskApp() {
       </Box>
     );
   else if (path === "home") content = <HomePage />;
-  else if (path === "inbox" && params.has("draft"))
-    content = (
-      <DraftPage key={params.get("draft")} id={params.get("draft") || ""} />
-    );
+  else if (draftID !== null) content = <DraftPage key={draftID} id={draftID} />;
   else if (path === "inbox")
     content = <InboxPage onPlay={setPlayback} upload={upload} />;
   else if (path === "library") content = <LibraryPage onPlay={setPlayback} />;
@@ -88,6 +90,7 @@ function DiskApp() {
           sx={(theme) => ({
             flex: 1,
             overflow: "auto",
+            overflowX: "hidden",
             pb: playback ? { mobile: "170px", tablet: "206px" } : "88px",
             pt: 1,
             [theme.breakpoints.up("laptop")]: {
@@ -97,6 +100,7 @@ function DiskApp() {
           })}
         >
           <PageWrapper
+            ref={pageRelay}
             className={
               path === "library"
                 ? "library-page"
@@ -104,7 +108,7 @@ function DiskApp() {
                   ? "home-page"
                   : path === "search"
                     ? "search-page"
-                    : path === "inbox" && !params.has("draft")
+                    : path === "inbox" && draftID === null
                       ? "inbox-page"
                       : undefined
             }

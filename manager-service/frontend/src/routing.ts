@@ -1,15 +1,22 @@
-import { useEffect, useState } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 
-export function useRoute() {
-  const [hash, setHash] = useState(location.hash);
-  useEffect(() => {
-    const update = () => setHash(location.hash);
-    window.addEventListener("hashchange", update);
-    return () => window.removeEventListener("hashchange", update);
-  }, []);
+function parseRoute(hash: string) {
   const [path, query] = (hash.slice(1) || "home").split("?");
   return { path, params: new URLSearchParams(query || "") };
 }
+
+function subscribe(listener: () => void) {
+  window.addEventListener("hashchange", listener);
+  return () => window.removeEventListener("hashchange", listener);
+}
+
+const getHash = () => location.hash;
+
+export function useRoute() {
+  const hash = useSyncExternalStore(subscribe, getHash);
+  return useMemo(() => parseRoute(hash), [hash]);
+}
+
 export function navigate(path: string) {
   location.hash = path;
 }
