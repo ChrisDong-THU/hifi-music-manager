@@ -7,6 +7,7 @@ import ssl
 import tempfile
 import unittest
 import urllib.error
+import xmlrpc.client
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
@@ -121,6 +122,22 @@ class PreflightSafetyTests(unittest.TestCase):
         with patch.object(installer, 'mount_identity', return_value=None), patch.object(installer, 'wait_http', side_effect=wait):
             installer.health(profile)
         self.assertEqual(checked, ['http://192.168.1.2:8787/healthz'] * 2)
+
+    def test_bubble_readiness_requires_digest_for_connection_and_server_information(self):
+        profile = dict(root='/home/service/hifi', volume='/media/missing', lan_ip='192.168.1.2', web_port=8787,
+                       bubble_public_domain='music.example.net')
+        checked = []
+
+        def check(domain, port, path, accept, body=None):
+            self.assertEqual((domain, port), ('music.example.net', installer.BUBBLE_HTTPS_TUNNEL_PORT))
+            self.assertTrue(accept(Mock(status=401, getheader=Mock(return_value='Digest realm="BubbleUPnP"'))))
+            self.assertFalse(accept(Mock(status=404)))
+            checked.append((path, xmlrpc.client.loads(body) if body is not None else None))
+
+        with patch.object(installer, 'mount_identity', return_value=None), \
+             patch.object(installer, 'wait_http'), patch.object(installer, 'check_public_https', side_effect=check):
+            installer.health(profile)
+        self.assertEqual(checked, [('/res/connectiontest', None), ('/xmlrpc', ((), 'upnpbridge.getServerInfo'))])
 
     def test_first_native_start_waits_for_discovery(self):
         with patch.object(installer, 'discover_backend', side_effect=[ValueError('starting'), 'ready']) as discover, patch.object(installer.time, 'sleep'):

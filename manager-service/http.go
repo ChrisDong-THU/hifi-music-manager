@@ -59,15 +59,8 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	}
 	return true
 }
-func (a *app) protect(next http.Handler) http.Handler {
-	return a.protectManager(next, nil, nil)
-}
-
-func (a *app) protectManager(next http.Handler, auth *managerAuth, health func() managerHealth) http.Handler {
-	return a.protectManagerHost(next, auth, health, "")
-}
-
-func (a *app) protectManagerHost(next http.Handler, auth *managerAuth, health func() managerHealth, publicDomain string) http.Handler {
+func (a *app) protectManager(next http.Handler, auth *managerAuth, health func() managerHealth, publicDomain string) http.Handler {
+	public := publicDomain != ""
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -79,7 +72,6 @@ func (a *app) protectManagerHost(next http.Handler, auth *managerAuth, health fu
 			host = h
 		}
 		host = strings.Trim(host, "[]")
-		public := publicDomain != ""
 		if public && !strings.EqualFold(strings.TrimSuffix(r.Host, ":443"), publicDomain) ||
 			!public && host != "localhost" && !a.allowedAddress(host) {
 			problem(w, 403, errors.New("不允许此访问主机"))

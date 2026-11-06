@@ -159,11 +159,12 @@ func (c *catalog) tracksPage(f libraryFilter, page, limit int, trackOrder bool) 
 	if limit < 1 || limit > 200 {
 		limit = 100
 	}
-	positions := c.matching(f)
-	if trackOrder {
-		if f.album != "" && f.query == "" && f.artist == "" && f.albumArtist == "" {
-			positions = c.albumOrder[f.album]
-		} else {
+	var positions []int
+	if trackOrder && f.album != "" && f.query == "" && f.artist == "" && f.albumArtist == "" {
+		positions = c.albumOrder[f.album]
+	} else {
+		positions = c.matching(f)
+		if trackOrder {
 			positions = append([]int(nil), positions...)
 			sort.Slice(positions, func(i, j int) bool { return c.trackLess(positions[i], positions[j]) })
 		}

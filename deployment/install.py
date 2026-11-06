@@ -20,6 +20,7 @@ import urllib.error
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
+import xmlrpc.client
 
 
 BINARIES = {"hifi-manager": "manager-service/hifi-manager",
@@ -251,9 +252,13 @@ def check_public_tls_files(root, service):
     context.load_cert_chain(str(cert), str(key), password='')
 
 
-def check_public_https(domain, port, path, accept, timeout=30):
+def check_public_https(domain, port, path, accept, timeout=30, body=None):
     context = ssl.create_default_context()
     address = ('127.0.0.1', port)
+    method = 'GET' if body is None else 'POST'
+    headers = {'Host': domain}
+    if body is not None:
+        headers['Content-Type'] = 'text/xml'
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -261,7 +266,7 @@ def check_public_https(domain, port, path, accept, timeout=30):
                 with context.wrap_socket(tcp, server_hostname=domain) as tls:
                     connection = http.client.HTTPConnection(*address, timeout=3)
                     connection.sock = tls
-                    connection.request('GET', path, headers={'Host': domain})
+                    connection.request(method, path, body=body, headers=headers)
                     with connection.getresponse() as response:
                         if accept(response):
                             return
@@ -365,7 +370,7 @@ def preflight(p):
             raise ValueError('Deployment/storage directories cannot contain symlinks: ' + str(path))
     music_link = root / 'music'
     if music_link.exists() or music_link.is_symlink():
-        if not music_link.is_symlink() or music_link.resolve() not in (volume/'hifi-music-nano/music',):
+        if not music_link.is_symlink() or music_link.resolve() != volume / 'hifi-music-nano/music':
             raise ValueError('Existing music entry points to a different library')
     systemctl('show-environment')
     if command('loginctl', 'show-user', str(os.getuid()), '-p', 'Linger', '--value') != 'yes':
@@ -561,10 +566,15 @@ def health(p):
     if p.get('manager_public_domain'):
         check_public_https(p['manager_public_domain'], MANAGER_TUNNEL_PORT, '/api/auth/status',
                            lambda response: response.status == 200 and json.loads(response.read(4096)) == {'authenticated': False})
-    if p.get('bubble_public_domain'):
-        check_public_https(p['bubble_public_domain'], BUBBLE_HTTPS_TUNNEL_PORT, '/res/connectiontest',
-                           lambda response: response.status == 401 and
-                           response.getheader('WWW-Authenticate', '').lower().startswith('digest '))
+    bubble_domain = p.get('bubble_public_domain')
+    if bubble_domain:
+        def requires_digest(response):
+            return (response.status == 401 and
+                    response.getheader('WWW-Authenticate', '').lower().startswith('digest '))
+
+        check_public_https(bubble_domain, BUBBLE_HTTPS_TUNNEL_PORT, '/res/connectiontest', requires_digest)
+        server_info = xmlrpc.client.dumps((), methodname='upnpbridge.getServerInfo').encode()
+        check_public_https(bubble_domain, BUBBLE_HTTPS_TUNNEL_PORT, '/xmlrpc', requires_digest, body=server_info)
     music = active_library(root)
     if music is None and mount_identity(p['volume']) is None:
         selected = [None]
@@ -580,7 +590,6 @@ def health(p):
         music = selected[0]
         if music is None:
             return
-    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
     # Settings remain available before the first disk is initialized.
     if music is None and not (pathlib.Path(p['volume'])/'hifi-music-nano/library-id').exists():
         return
@@ -615,19 +624,15 @@ def health(p):
 def restart_set(changed):
     services = set()
     for path in changed:
-        text = str(path)
-        if path.name == 'launch-service.py':
+        name = path.name
+        if name in ('launch-service.py', 'config.json', 'hifi-music-service', 'hifi-music.service'):
             services.update(('hifi-music.service', 'hifi-manager.service'))
-        if 'hifi-manager' in path.name:
+        elif name in ('hifi-manager', 'hifi-manager.service'):
             services.add('hifi-manager.service')
-        if path.name == 'config.json' or 'hifi-music' in path.name:
-            services.update(('hifi-music.service', 'hifi-manager.service'))
-        if 'hifi-minimserver' in text:
+        elif name == 'hifi-minimserver.service' or (name == 'usb-storage.conf' and path.parent.name == 'hifi-minimserver.service.d'):
             services.update(('hifi-minimserver.service', 'hifi-music.service', 'hifi-manager.service'))
-        if 'hifi-bubbleupnp' in text:
-            services.add('hifi-bubbleupnp.service')
-        if path.name == BUBBLE_RELAY_UNIT:
-            services.add(BUBBLE_RELAY_UNIT)
+        elif name in ('hifi-bubbleupnp.service', BUBBLE_RELAY_UNIT):
+            services.add(name)
     return services
 
 
@@ -661,9 +666,16 @@ def apply_files(p, files, generation):
     if mount_identity(p['volume']) != generation:
         raise RuntimeError('Music mount changed after preflight')
     root = pathlib.Path(p['root'])
-    changed = {path: value for path, value in files.items()
-               if not path.is_file() or path.read_bytes() != value[0] or (path.stat().st_mode & 0o777) != value[1]}
-    previous = {path: (path.read_bytes(), path.stat().st_mode & 0o777) if path.exists() else None for path in changed}
+    changed, previous = {}, {}
+    for path, value in files.items():
+        try:
+            with path.open('rb') as stream:
+                installed = (stream.read(), os.fstat(stream.fileno()).st_mode & 0o777)
+        except FileNotFoundError:
+            installed = None
+        if installed != value:
+            changed[path] = value
+            previous[path] = installed
     enabled = ['hifi-music.service', 'hifi-manager.service']
     if p['manage_bubble']:
         enabled.append('hifi-bubbleupnp.service')
@@ -691,7 +703,8 @@ def apply_files(p, files, generation):
         for path, (data, mode) in changed.items():
             atomic(path, data, mode)
         command(str(root / BINARIES['hifi-music-service']), '-home', str(root), '-check')
-        systemctl('daemon-reload') if changed else None
+        if changed:
+            systemctl('daemon-reload')
         missing = [name for name in enabled if not was_enabled[name]]
         if missing:
             systemctl('enable', *missing)

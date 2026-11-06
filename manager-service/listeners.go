@@ -45,7 +45,7 @@ func serveManager(ctx context.Context, endpoints []managerEndpoint, gate *app, n
 	}
 	var bound []boundEndpoint
 	for _, endpoint := range endpoints {
-		handler := gate.protectManagerHost(next, auth, health, endpoint.publicDomain)
+		handler := gate.protectManager(next, auth, health, endpoint.publicDomain)
 		server := &http.Server{Addr: endpoint.listen, Handler: requestBodyTimeout(handler, 2*time.Minute),
 			ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 		if endpoint.cert != "" {

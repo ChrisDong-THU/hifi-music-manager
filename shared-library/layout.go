@@ -46,12 +46,7 @@ type DiskPreference struct {
 func DataPath(mount string) string    { return filepath.Join(mount, DataDirectory) }
 func MusicPath(mount string) string   { return filepath.Join(DataPath(mount), MusicDirectory) }
 func ManagerPath(mount string) string { return filepath.Join(DataPath(mount), ManagerDirectory) }
-func ArtistsPath(mount string) string {
-	return filepath.Join(DataPath(mount), filepath.FromSlash(ArtistDirectory))
-}
-func MinimPath(mount, device string) string {
-	return filepath.Join(DataPath(mount), MinimServerDirectory, device)
-}
+
 func ValidID(id string) bool {
 	if len(id) != 48 {
 		return false

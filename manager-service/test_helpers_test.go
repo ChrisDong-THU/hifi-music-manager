@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -9,6 +10,10 @@ import (
 
 	library "hifi.local/library"
 )
+
+func (a *app) protect(next http.Handler) http.Handler {
+	return a.protectManager(next, nil, nil, "")
+}
 
 // Fixtures use the production write boundary, including its cache revision.
 func (a *app) putTrack(track Track) error {

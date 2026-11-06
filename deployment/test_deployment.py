@@ -171,10 +171,11 @@ class DeploymentTests(unittest.TestCase):
                 installer.payload(bundle, 'arm64')
 
     def test_restart_follows_application_dependencies(self):
-        self.assertEqual(installer.restart_set([pathlib.Path('hifi-bubbleupnp.service')]),
+        self.assertEqual(installer.restart_set([pathlib.Path('hifi-minimserver-lab/hifi-bubbleupnp.service')]),
                          {'hifi-bubbleupnp.service'})
-        self.assertEqual(installer.restart_set([pathlib.Path('hifi-minimserver.service')]),
-                         {'hifi-minimserver.service', 'hifi-music.service', 'hifi-manager.service'})
+        for path in ('hifi-minimserver.service', 'hifi-minimserver.service.d/usb-storage.conf'):
+            self.assertEqual(installer.restart_set([pathlib.Path(path)]),
+                             {'hifi-minimserver.service', 'hifi-music.service', 'hifi-manager.service'})
 
     def test_first_device_cli_generates_uuid_once_and_reuses_it(self):
         # Exercise the real CLI/config/payload/transaction path on an empty root.
