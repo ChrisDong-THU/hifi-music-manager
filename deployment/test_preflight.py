@@ -16,6 +16,31 @@ spec.loader.exec_module(installer)
 
 
 class PreflightSafetyTests(unittest.TestCase):
+    def test_public_manager_domain_is_safe_as_a_unit_argument(self):
+        self.assertEqual(installer.public_domain('Manage.Example.NET'), 'manage.example.net')
+        for value in ('', 'localhost', '127.0.0.1', 'https://manage.example.net', 'manage.example.net:443',
+                      'manage.example.net\nExecStart=', '*.example.net', 'manage_.example.net', None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                installer.public_domain(value)
+
+    def test_public_bubble_requires_an_initialized_account_without_remote_admin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path = root / 'bubbleupnp/configuration.xml'
+            path.parent.mkdir()
+            with self.assertRaisesRegex(ValueError, 'Complete local'):
+                installer.check_bubble_account(root)
+            settings = ('<configuration><firstRun>false</firstRun><login>owner</login>'
+                        '<password>fixture</password><allowWANConnections>true</allowWANConnections></configuration>')
+            path.write_text(settings)
+            installer.check_bubble_account(root)
+            for value in (settings.replace('>false<', '>true<'), settings.replace('>true<', '>false<'),
+                          settings.replace('fixture', 'OBF:1u2a1toa1w8v1tok1u30'),
+                          settings.replace('</configuration>', '<allowWANConfigurationUI>true</allowWANConfigurationUI></configuration>')):
+                path.write_text(value)
+                with self.assertRaises(ValueError):
+                    installer.check_bubble_account(root)
+
     def test_manager_health_requires_an_object_with_boolean_flags(self):
         for body in (b'null', b'[]', b'{"service":"hifi-manager","busy":1,"storage_ready":true}'):
             with self.subTest(body=body), self.assertRaisesRegex(ValueError, 'Invalid manager health response'):

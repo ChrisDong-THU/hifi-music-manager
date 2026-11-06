@@ -6,8 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,22 +25,6 @@ func main() {
 	}
 }
 
-type managerTLS struct{ cert, key string }
-
-func (t managerTLS) scheme() string {
-	if t.cert != "" {
-		return "https"
-	}
-	return "http"
-}
-
-func (t managerTLS) serve(server *http.Server, listener net.Listener) error {
-	if t.cert != "" {
-		return server.ServeTLS(listener, t.cert, t.key)
-	}
-	return server.Serve(listener)
-}
-
 func run() error {
 	home := flag.String("home", "../downloads/manager-local", "database and service directory")
 	libraryHome := flag.String("library-home", "", "project root: select all storage from the current USB library")
@@ -51,6 +33,9 @@ func run() error {
 	lan := flag.String("allow-lan", "", "optional private LAN CIDR")
 	cert := flag.String("tls-cert", "", "PEM certificate for HTTPS management")
 	key := flag.String("tls-key", "", "PEM private key for HTTPS management")
+	publicDomain := flag.String("public-domain", "", "optional HTTPS management domain for the local FRP endpoint")
+	publicCert := flag.String("public-tls-cert", "", "PEM certificate chain for the public management domain")
+	publicKey := flag.String("public-tls-key", "", "PEM private key for the public management domain")
 	music := flag.String("music", "", "optional external music directory")
 	data := flag.String("data", "", "optional upload directory")
 	volume := flag.String("volume", "", "Linux mount point required for external USB storage")
@@ -64,10 +49,10 @@ func run() error {
 		}
 		return printManagerInvite(directory, *invite)
 	}
-	if (*cert == "") != (*key == "") {
-		return fmt.Errorf("tls-cert 和 tls-key 必须一起指定")
+	endpoints, err := managerEndpoints(managerEndpoint{listen: *listen, cert: *cert, key: *key}, *publicDomain, *publicCert, *publicKey)
+	if err != nil {
+		return err
 	}
-	transport := managerTLS{cert: *cert, key: *key}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	allowed, err := accessNetwork(*listen, *lan)
@@ -82,7 +67,7 @@ func run() error {
 		if *dataDisks {
 			return fmt.Errorf("library-home 和 data-disks 不能同时使用")
 		}
-		return runDiskManager(ctx, project, *listen, allowed, *rescanURL, false, transport)
+		return runDiskManager(ctx, project, allowed, *rescanURL, false, endpoints)
 	}
 	abs, err := filepath.Abs(*home)
 	if err != nil {
@@ -92,7 +77,7 @@ func run() error {
 		if *music != "" || *data != "" || *volume != "" {
 			return fmt.Errorf("数据盘管理模式不能指定独立的 music、data 或 volume")
 		}
-		return runDiskManager(ctx, abs, *listen, allowed, *rescanURL, true, transport)
+		return runDiskManager(ctx, abs, allowed, *rescanURL, true, endpoints)
 	}
 	musicPath, dataPath := filepath.Join(abs, library.MusicDirectory), filepath.Join(abs, library.ManagerDirectory)
 	if *music != "" {
@@ -165,24 +150,8 @@ func run() error {
 		}()
 	}
 	a.start(ctx)
-	mux := a.routes(staticSite())
-	handler := a.protectManager(a.trackRequests(mux), auth, a.health)
-	server := &http.Server{Addr: *listen, Handler: requestBodyTimeout(handler, 2*time.Minute), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
-	l, err := net.Listen("tcp", *listen)
-	if err != nil {
-		return err
-	}
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdown); err != nil {
-			_ = server.Close()
-		}
-	}()
-	log.Printf("hifi-music-nano · %s://%s · 数据 %s · 曲库 %s", transport.scheme(), l.Addr(), abs, musicPath)
-	err = transport.serve(server, l)
-	if err == http.ErrServerClosed {
+	err = serveManager(ctx, endpoints, a, a.trackRequests(a.routes(staticSite())), auth, a.health)
+	if err == nil {
 		select {
 		case err := <-storageLost:
 			return err

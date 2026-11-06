@@ -46,6 +46,19 @@ class LaunchTests(unittest.TestCase):
                 args = execute.call_args[0][1]
                 self.assertEqual(args[args.index('-listen') + 1], '192.168.1.5:8787')
                 self.assertEqual(args[args.index('-allow-lan') + 1], '192.168.1.0/24')
+                self.assertNotIn('-public-domain', args)
+                launcher.start('manager', root, 8787, public_domain='manage.example.net')
+                args = execute.call_args[0][1]
+                self.assertEqual(args[-6:], ['-public-domain', 'manage.example.net',
+                    '-public-tls-cert', str(root / 'config/manager-public-tls-cert.pem'),
+                    '-public-tls-key', str(root / 'config/manager-public-tls-key.pem')])
+                launcher.start('bubble', root, 8787, public_domain='music.example.net')
+                args = execute.call_args[0][1]
+                self.assertEqual(args[:4], ['/usr/bin/authbind', '--deep', '/bin/sh', str(root / 'bubbleupnp/launch.sh')])
+                self.assertEqual(args[-6:], ['-lanIp', '192.168.1.5', '-httpPort', '80', '-wanHostname', 'music.example.net'])
+                launcher.start('bubble-relay', root, 8787, public_domain='music.example.net')
+                args = execute.call_args[0][1]
+                self.assertEqual(args[-4:], ['-bubble-relay-domain', 'music.example.net', '-bubble-relay-upstream', '192.168.1.5'])
             self.assertEqual([p.name for p in path.parent.iterdir()], ['config.json'])
 
     def test_delayed_network_is_retried_and_missing_network_times_out(self):

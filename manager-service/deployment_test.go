@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,73 @@ import (
 	"testing"
 	"time"
 )
+
+func TestManagerPublicEndpointRetainsAuthentication(t *testing.T) {
+	const domain = "manager.example.net"
+	auth, err := openManagerAuth(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer auth.db.Close()
+	if err := auth.registerAccount(managerCredentials{Username: "owner", Password: "A fixture password", InviteCode: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	gate := &app{lan: netip.MustParsePrefix("192.168.1.0/24"), csrf: "csrf-token", cookieName: "hifi_session_test"}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	health := func() managerHealth { return managerHealth{} }
+	public := gate.protectManagerHost(next, auth, health, domain)
+	request := func(handler http.Handler, scheme, host, remote, method, path, origin string, authCookie *http.Cookie, csrf bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, scheme+"://"+host+path, strings.NewReader(`{"username":"owner","password":"A fixture password"}`))
+		r.RemoteAddr = remote
+		if scheme == "https" {
+			r.TLS = &tls.ConnectionState{}
+		}
+		r.Header.Set("Origin", origin)
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("X-Forwarded-Host", domain)
+		r.Header.Set("X-Forwarded-Proto", "https")
+		if authCookie != nil {
+			r.AddCookie(authCookie)
+		}
+		if csrf {
+			r.AddCookie(&http.Cookie{Name: gate.cookieName, Value: gate.csrf})
+			r.Header.Set("X-CSRF-Token", gate.csrf)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	const loopback = "127.0.0.1:1234"
+	for _, test := range []struct {
+		scheme, host, remote, method, path, origin string
+		want                                       int
+	}{
+		{"https", domain, loopback, "GET", "/api/state", "", 401},
+		{"https", domain, loopback, "GET", "/healthz", "", 404},
+		{"https", "127.0.0.1:18787", loopback, "GET", "/", "", 403},
+		{"https", domain, "192.168.1.4:1234", "GET", "/", "", 403},
+		{"http", domain, loopback, "POST", "/api/auth/login", "", 403},
+		{"https", domain, loopback, "POST", "/api/auth/login", "https://sibling.example.net", 403},
+	} {
+		if w := request(public, test.scheme, test.host, test.remote, test.method, test.path, test.origin, nil, false); w.Code != test.want {
+			t.Fatalf("%+v: got %d", test, w.Code)
+		}
+	}
+	if w := request(gate.protectManager(next, auth, health), "https", domain, loopback, "GET", "/", "", nil, false); w.Code != 403 {
+		t.Fatal("LAN listener accepted the public host")
+	}
+	login := request(public, "https", domain+":443", loopback, "POST", "/api/auth/login", "https://"+domain, nil, false)
+	cookies := login.Result().Cookies()
+	if login.Code != 200 || len(cookies) != 1 || !cookies[0].Secure || cookies[0].Domain != "" {
+		t.Fatalf("public login did not issue a secure host-only session: %d", login.Code)
+	}
+	for _, csrf := range []bool{false, true} {
+		w := request(public, "https", domain, loopback, "POST", "/edit", "https://"+domain, cookies[0], csrf)
+		if (!csrf && w.Code != 403) || (csrf && w.Code != 204) {
+			t.Fatalf("public write with CSRF token %t returned %d", csrf, w.Code)
+		}
+	}
+}
 
 func TestLANAccessIsExplicitAndRetainsOriginAndSessionGuards(t *testing.T) {
 	for _, network := range []string{"0.0.0.0/0", "8.8.8.0/24", "10.0.0.0/7", "192.168.0.0/15", "bad"} {

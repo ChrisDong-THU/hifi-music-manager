@@ -110,7 +110,17 @@ func run() error {
 	home := flag.String("home", filepath.Join(userHome, "hifi"), "music service root")
 	check := flag.Bool("check", false, "validate existing configuration without starting services")
 	minimRuntime := flag.Bool("minim-runtime", false, "run MinimServer using the selected disk's private index")
+	bubbleDomain := flag.String("bubble-relay-domain", "", "serve BubbleUPnP through the specified public domain")
+	bubbleUpstream := flag.String("bubble-relay-upstream", "", "literal private IPv4 address of this device's BubbleUPnP Server")
 	flag.Parse()
+	if *bubbleDomain != "" || *bubbleUpstream != "" {
+		if *check || *minimRuntime {
+			return errors.New("BubbleUPnP relay is a separate service mode")
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		return runBubbleRelay(ctx, *home, *bubbleDomain, *bubbleUpstream)
+	}
 	config, err := readServiceConfig(filepath.Join(*home, "music-service", "config.json"))
 	if err != nil {
 		return err

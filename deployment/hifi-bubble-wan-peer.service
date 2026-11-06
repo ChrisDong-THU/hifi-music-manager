@@ -1,0 +1,10 @@
+[Unit]
+Description=Local WAN peer for the HiFi BubbleUPnP relay
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ip address replace 192.0.2.1/32 dev lo
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

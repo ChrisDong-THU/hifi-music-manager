@@ -5,8 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"log"
-	"net"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -412,7 +410,7 @@ func (c *diskController) currentSelection(ctx context.Context) (librarySelection
 	return librarySelection{}, errors.New("等待指定数据盘就绪")
 }
 
-func runDiskManager(ctx context.Context, project, listen string, lan netip.Prefix, rescanURL string, standalone bool, transport managerTLS) error {
+func runDiskManager(ctx context.Context, project string, lan netip.Prefix, rescanURL string, standalone bool, endpoints []managerEndpoint) error {
 	auth, err := openManagerAuth(project)
 	if err != nil {
 		return err
@@ -456,24 +454,5 @@ func runDiskManager(ctx context.Context, project, listen string, lan netip.Prefi
 		c.workers.Wait()
 		<-done
 	}()
-	handler := security.protectManager(c, auth, c.health)
-	server := &http.Server{Addr: listen, Handler: requestBodyTimeout(handler, 2*time.Minute), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
-	l, err := net.Listen("tcp", listen)
-	if err != nil {
-		return err
-	}
-	go func() {
-		<-ctx.Done()
-		shutdown, stop := context.WithTimeout(context.Background(), 15*time.Second)
-		defer stop()
-		if server.Shutdown(shutdown) != nil {
-			server.Close()
-		}
-	}()
-	log.Printf("hifi-music-nano · %s://%s", transport.scheme(), listen)
-	err = transport.serve(server, l)
-	if err == http.ErrServerClosed {
-		return nil
-	}
-	return err
+	return serveManager(ctx, endpoints, security, c, auth, c.health)
 }

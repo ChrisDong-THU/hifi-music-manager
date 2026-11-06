@@ -61,8 +61,9 @@ def publish(path, config):
             os.unlink(pending)
 
 
-def start(service, home, web_port, timeout=120):
-    if service not in ('music', 'manager') or not 1024 <= int(web_port) <= 65535:
+def start(service, home, web_port, timeout=120, public_domain=''):
+    if (service not in ('music', 'manager', 'bubble', 'bubble-relay') or not 1024 <= int(web_port) <= 65535 or
+            public_domain and service == 'music' or not public_domain and service in ('bubble', 'bubble-relay')):
         raise ValueError('Invalid service or Web port')
     root = pathlib.Path(home)
     path = root / 'music-service/config.json'
@@ -90,18 +91,28 @@ def start(service, home, web_port, timeout=120):
             publish(path, config)
         executable = str(root / 'music-service/hifi-music-service')
         args = [executable, '-home', str(root)]
-    else:
+    elif service == 'manager':
         executable = str(root / 'manager-service/hifi-manager')
         args = [executable, '-library-home', str(root), '-listen', address + ':' + str(web_port),
                 '-allow-lan', str(network), '-rescan-url', 'http://127.0.0.1:9790/']
         cert, key = (root / 'config' / name for name in ('manager-tls-cert.pem', 'manager-tls-key.pem'))
         if cert.exists() or key.exists():
             args += ['-tls-cert', str(cert), '-tls-key', str(key)]
+        if public_domain:
+            cert, key = (root / 'config' / name for name in ('manager-public-tls-cert.pem', 'manager-public-tls-key.pem'))
+            args += ['-public-domain', public_domain, '-public-tls-cert', str(cert), '-public-tls-key', str(key)]
+    elif service == 'bubble':
+        executable = '/usr/bin/authbind'
+        args = [executable, '--deep', '/bin/sh', str(root / 'bubbleupnp/launch.sh'), '-disableUPnPPortForwarding',
+                '-disableCloudFfprobe', '-lanIp', address, '-httpPort', '80', '-wanHostname', public_domain]
+    else:
+        executable = str(root / 'music-service/hifi-music-service')
+        args = [executable, '-home', str(root), '-bubble-relay-domain', public_domain, '-bubble-relay-upstream', address]
     print('Starting ' + service + ' on ' + address, flush=True)
     os.execv(executable, args)
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 4:
-        raise SystemExit('Usage: launch.py music|manager HOME WEB_PORT')
-    start(*sys.argv[1:])
+    if len(sys.argv) not in (4, 5):
+        raise SystemExit('Usage: launch.py music|manager|bubble|bubble-relay HOME WEB_PORT [PUBLIC_DOMAIN]')
+    start(*sys.argv[1:4], public_domain=sys.argv[4] if len(sys.argv) == 5 else '')

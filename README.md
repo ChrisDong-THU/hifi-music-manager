@@ -39,7 +39,7 @@ powershell -File scripts/update-manager-local.ps1
 powershell -File scripts/build-manager.ps1 -OutputDirectory downloads/manager-build
 ```
 
-Linux 或其他开发环境的直接启动方式见[开发指南](docs/DEVELOPMENT.md)。默认仅监听回环地址。局域网管理需要显式配置可信网段和 HTTPS，管理端口不应公开到互联网。
+Linux 或其他开发环境的直接启动方式见[开发指南](docs/DEVELOPMENT.md)。默认仅监听回环地址，局域网管理需要显式配置可信网段和 HTTPS。
 
 ## 设备部署
 
@@ -52,6 +52,8 @@ python deployment/deploy.py --device config/devices/local.json --apply
 ```
 
 将 [example.json](config/devices/example.json) 复制为本机的 `local.json` 并填写设备配置。完整步骤见[部署指南](deployment/README.md)。构建不会连接设备；更新保留既有数据、配置和身份。
+
+Nano 可通过 ChmlFrp 提供公网管理 Web、浏览器试听和 BubbleUPnP 远程播放。见[公网部署与验收](deployment/CHMLFRP.md)。
 
 ## 项目结构
 

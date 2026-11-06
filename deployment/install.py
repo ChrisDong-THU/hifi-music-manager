@@ -1,6 +1,7 @@
 """Target-side installer. Python 3.6+, standard library, no destructive reset path."""
 import argparse
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
@@ -24,6 +25,19 @@ import xml.etree.ElementTree as ET
 BINARIES = {"hifi-manager": "manager-service/hifi-manager",
             "hifi-music-service": "music-service/hifi-music-service"}
 PRIVATE = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+DNS_LABEL = r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?'
+MANAGER_TUNNEL_PORT = 18787
+BUBBLE_HTTPS_TUNNEL_PORT = 18443
+BUBBLE_WAN_PEER = '192.0.2.1'
+BUBBLE_RELAY_UNIT = 'hifi-bubble-relay.service'
+
+
+def public_domain(value):
+    if (not isinstance(value, str) or len(value) > 253 or
+            not re.fullmatch(r'(?:' + DNS_LABEL + r'\.)+' + DNS_LABEL, value) or
+            re.fullmatch(r'[0-9.]+', value)):
+        raise ValueError('Use a full public DNS name without a scheme or port')
+    return value.lower()
 
 def launcher_source():
     # deploy.py transmits the same source with this installer over stdin.
@@ -107,7 +121,8 @@ def wait_backend(ip, timeout=45):
 def resolve(profile):
     p = dict(profile)
     allowed = {'root', 'volume', 'lan_ip', 'lan_cidr', 'web_port', 'browse_port', 'name',
-               'manage_minim', 'manage_bubble', 'backend_description', 'browse_udn', 'java_home'}
+               'manage_minim', 'manage_bubble', 'backend_description', 'browse_udn', 'java_home',
+               'manager_public_domain', 'bubble_public_domain'}
     if set(p) - allowed:
         raise ValueError('Unknown device settings: ' + ', '.join(sorted(set(p) - allowed)))
     p["root"] = str(safe_path(p.get("root", "~/hifi")))
@@ -146,6 +161,11 @@ def resolve(profile):
             raise ValueError(key + ' must be an unprivileged TCP port')
     if p['web_port'] == p['browse_port']:
         raise ValueError('Web and music ports must differ')
+    for key in ('manager_public_domain', 'bubble_public_domain'):
+        if key in p:
+            p[key] = public_domain(p[key])
+    if p.get('bubble_public_domain') and p['bubble_public_domain'] == p.get('manager_public_domain'):
+        raise ValueError('Use separate domains for the public manager and BubbleUPnP')
     p.setdefault('name', 'hifi-music')
     if not isinstance(p['name'], str) or not p['name'].strip() or len(p['name']) > 100:
         raise ValueError('Invalid device name')
@@ -154,6 +174,8 @@ def resolve(profile):
     for key in ('manage_minim', 'manage_bubble'):
         if type(p[key]) is not bool:
             raise ValueError(key + ' must be a boolean')
+    if p.get('bubble_public_domain') and not p['manage_bubble']:
+        raise ValueError('bubble_public_domain requires manage_bubble')
     existing_path = root / 'music-service/config.json'
     existing = json.loads(existing_path.read_text()) if existing_path.exists() else {}
     for key in ('browse_udn', 'backend_description'):
@@ -220,6 +242,60 @@ def manager_endpoint(p, validate_tls=False):
     return scheme + '://' + p['lan_ip'] + ':' + str(p['web_port']), urllib.request.build_opener(*handlers)
 
 
+def check_public_tls_files(root, service):
+    config = root / 'config'
+    cert, key = (config / (service + '-public-tls-' + name + '.pem') for name in ('cert', 'key'))
+    if not cert.is_file() or not key.is_file() or key.stat().st_mode & 0o077:
+        raise ValueError('Provide {} and a private {} (chmod 600)'.format(cert.name, key.name))
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(cert), str(key), password='')
+
+
+def check_public_https(domain, port, path, accept, timeout=30):
+    context = ssl.create_default_context()
+    address = ('127.0.0.1', port)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with socket.create_connection(address, timeout=3) as tcp:
+                with context.wrap_socket(tcp, server_hostname=domain) as tls:
+                    connection = http.client.HTTPConnection(*address, timeout=3)
+                    connection.sock = tls
+                    connection.request('GET', path, headers={'Host': domain})
+                    with connection.getresponse() as response:
+                        if accept(response):
+                            return
+        except ssl.SSLError:
+            raise
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Public HTTPS origin failed local readiness check: ' + domain + path)
+        time.sleep(0.5)
+
+
+def bubble_local_url(p):
+    port = 80 if p.get('bubble_public_domain') else 58050
+    return 'http://' + p['lan_ip'] + ':' + str(port) + '/'
+
+
+def check_bubble_account(root):
+    path = root / 'bubbleupnp/configuration.xml'
+    try:
+        settings = ET.parse(str(path)).getroot()
+    except (OSError, ET.ParseError) as error:
+        raise ValueError('Complete local BubbleUPnP setup before enabling its public relay') from error
+    password = settings.findtext('password', '').strip()
+    if (settings.findtext('firstRun', '').strip().lower() != 'false' or
+            not settings.findtext('login', '').strip() or not password or password == 'OBF:1u2a1toa1w8v1tok1u30'):
+        raise ValueError('Set a non-default BubbleUPnP account on the LAN first')
+    if (settings.findtext('allowWANConnections', '').strip().lower() != 'true' or
+            settings.findtext('allowWANConfigurationUI', 'false').strip().lower() != 'false' or
+            settings.findtext('webContextPath', '/').strip() != '/'):
+        raise ValueError('BubbleUPnP requires remote access enabled, WAN configuration disabled, and webContextPath /')
+
+
 def manager_health(body):
     state = json.loads(body.decode())
     if (not isinstance(state, dict) or state.get('service') != 'hifi-manager' or not isinstance(state.get('busy'), bool)
@@ -262,6 +338,20 @@ def preflight(p):
         raise ValueError('Run as the normal service owner, not root')
     root, volume = pathlib.Path(p['root']), pathlib.Path(p['volume'])
     manager_url, manager_opener = manager_endpoint(p, validate_tls=True)
+    if p.get('manager_public_domain'):
+        if not manager_url.startswith('https://'):
+            raise ValueError('Provide the LAN manager HTTPS certificate and key before enabling the public manager')
+        check_public_tls_files(root, 'manager')
+    if p.get('bubble_public_domain'):
+        check_public_tls_files(root, 'bubble')
+        check_bubble_account(root)
+        if not (os.access('/usr/bin/authbind', os.X_OK) and os.access('/etc/authbind/byport/80', os.X_OK)):
+            raise ValueError('Enable port 80 for the service owner using authbind; see deployment/CHMLFRP.md')
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind((BUBBLE_WAN_PEER, 0))
+        except OSError as error:
+            raise ValueError('Set up the local BubbleUPnP WAN peer; see deployment/CHMLFRP.md') from error
     generation = mount_identity(str(volume))
     inventory = json.loads(command('lsblk', '-J', '-p', '-o', 'NAME,TYPE,TRAN,MOUNTPOINT'))
     def usb(nodes, bus=''):
@@ -343,6 +433,8 @@ def render(p):
                  '/usr/bin/python3', str(launcher) + ' music ' + str(root) + ' ' + str(p['web_port'])), 0o644),
              launcher: (launcher_source(), 0o600)}
     args = str(launcher) + ' manager ' + str(root) + ' ' + str(p['web_port'])
+    if p.get('manager_public_domain'):
+        args += ' ' + public_domain(p['manager_public_domain'])
     files[units / 'hifi-manager.service'] = (unit('HiFi Web music manager', root / 'manager-service',
         '/usr/bin/python3', args, '256MiB',
         'After=hifi-music.service\nRequires=hifi-music.service\nPartOf=hifi-music.service\n'), 0o644)
@@ -359,10 +451,27 @@ def render(p):
             '[Service]\nExecStart=\nExecStart=' + str(root / BINARIES['hifi-music-service']) +
             ' -home ' + str(root) + ' -minim-runtime\nTimeoutStopSec=45\n', 0o644)
     if p['manage_bubble']:
-        text = unit('HiFi BubbleUPnP remote media gateway', root / 'bubbleupnp', '/bin/sh',
-                    str(root / 'bubbleupnp/launch.sh') + ' -disableUPnPPortForwarding -disableCloudFfprobe -lanIp ' + p['lan_ip'])
+        bubble_domain = p.get('bubble_public_domain')
+        jvm_args = '-Xmx256m'
+        if bubble_domain:
+            args = str(launcher) + ' bubble ' + str(root) + ' ' + str(p['web_port']) + ' ' + public_domain(bubble_domain)
+            text = unit('HiFi BubbleUPnP remote media gateway', root / 'bubbleupnp', '/usr/bin/python3', args,
+                        dependencies='Wants=' + BUBBLE_RELAY_UNIT + '\n')
+            # authbind grants only port 80 through its setuid helper.
+            text = text.replace('NoNewPrivileges=true\n', '')
+            jvm_args += ' -Djava.net.preferIPv4Stack=true'
+        else:
+            text = unit('HiFi BubbleUPnP remote media gateway', root / 'bubbleupnp', '/bin/sh',
+                        str(root / 'bubbleupnp/launch.sh') + ' -disableUPnPPortForwarding -disableCloudFfprobe -lanIp ' + p['lan_ip'])
         files[units / 'hifi-bubbleupnp.service'] = (text.replace('[Service]\n', '[Service]\n' + java_env +
-                                                   'Environment=USER_JVM_ARGS=-Xmx256m\n'), 0o644)
+                                                   'Environment="USER_JVM_ARGS=' + jvm_args + '"\n'), 0o644)
+    relay_unit = units / BUBBLE_RELAY_UNIT
+    if p.get('bubble_public_domain'):
+        args = str(launcher) + ' bubble-relay ' + str(root) + ' ' + str(p['web_port']) + ' ' + public_domain(p['bubble_public_domain'])
+        files[relay_unit] = (unit('HiFi public BubbleUPnP relay', root / 'music-service', '/usr/bin/python3', args,
+                                 dependencies='After=hifi-bubbleupnp.service\nPartOf=hifi-bubbleupnp.service\n'), 0o644)
+    elif relay_unit.exists():
+        files[relay_unit] = ('[Unit]\nDescription=HiFi BubbleUPnP relay disabled\n\n[Service]\nType=oneshot\nExecStart=/bin/true\n', 0o644)
     return {path: (data.encode(), mode) for path, (data, mode) in files.items()}
 
 
@@ -449,6 +558,13 @@ def health(p):
     origin, web_opener = manager_endpoint(p)
     web = origin + '/healthz'
     wait_http(web, lambda b: bool(manager_health(b)), opener=web_opener)
+    if p.get('manager_public_domain'):
+        check_public_https(p['manager_public_domain'], MANAGER_TUNNEL_PORT, '/api/auth/status',
+                           lambda response: response.status == 200 and json.loads(response.read(4096)) == {'authenticated': False})
+    if p.get('bubble_public_domain'):
+        check_public_https(p['bubble_public_domain'], BUBBLE_HTTPS_TUNNEL_PORT, '/res/connectiontest',
+                           lambda response: response.status == 401 and
+                           response.getheader('WWW-Authenticate', '').lower().startswith('digest '))
     music = active_library(root)
     if music is None and mount_identity(p['volume']) is None:
         selected = [None]
@@ -493,7 +609,7 @@ def health(p):
     if active_library(root) != music:
         raise RuntimeError('USB supervisor selected a different library')
     if p['manage_bubble']:
-        wait_http('http://' + p['lan_ip'] + ':58050/')
+        wait_http(bubble_local_url(p))
 
 
 def restart_set(changed):
@@ -510,6 +626,8 @@ def restart_set(changed):
             services.update(('hifi-minimserver.service', 'hifi-music.service', 'hifi-manager.service'))
         if 'hifi-bubbleupnp' in text:
             services.add('hifi-bubbleupnp.service')
+        if path.name == BUBBLE_RELAY_UNIT:
+            services.add(BUBBLE_RELAY_UNIT)
     return services
 
 
@@ -522,17 +640,21 @@ def activate(p, services):
             pass  # The USB supervisor starts it after preparing the music link.
         else:
             systemctl('restart', 'hifi-minimserver.service')
-    for name in ('hifi-music.service', 'hifi-manager.service', 'hifi-bubbleupnp.service'):
+    for name in ('hifi-music.service', 'hifi-manager.service', 'hifi-bubbleupnp.service', BUBBLE_RELAY_UNIT):
         if not (units / name).exists():
             continue
         if name == 'hifi-bubbleupnp.service' and not p['manage_bubble']:
+            continue
+        if name == BUBBLE_RELAY_UNIT and not p.get('bubble_public_domain'):
+            if name in services:
+                systemctl('stop', name)
             continue
         if name in services:
             systemctl('restart', name)
         else:
             systemctl('start', name)
         if name == 'hifi-bubbleupnp.service':
-            wait_http('http://' + p['lan_ip'] + ':58050/')
+            wait_http(bubble_local_url(p))
 
 
 def apply_files(p, files, generation):
@@ -560,6 +682,11 @@ def apply_files(p, files, generation):
                 atomic(backup / str(index), value[0], 0o600)
         atomic(backup / 'manifest.json', json.dumps({str(i): str(path) for i, path in enumerate(previous)}).encode(), 0o600)
     services = restart_set(changed)
+    if p.get('bubble_public_domain'):
+        if root / BINARIES['hifi-music-service'] in changed:
+            services.add(BUBBLE_RELAY_UNIT)
+        if root / 'deployment/launch-service.py' in changed:
+            services.update(('hifi-bubbleupnp.service', BUBBLE_RELAY_UNIT))
     try:
         for path, (data, mode) in changed.items():
             atomic(path, data, mode)
@@ -573,7 +700,7 @@ def apply_files(p, files, generation):
         atomic(root / 'deployment/state.json', json.dumps(dict(p,storage_mode='usb'), indent=2).encode(), 0o600)
     except BaseException:
         # Stop new code before restoring old executables/units. Persistent data is never replaced.
-        for name in ('hifi-manager.service', 'hifi-music.service', 'hifi-bubbleupnp.service', 'hifi-minimserver.service'):
+        for name in (BUBBLE_RELAY_UNIT, 'hifi-manager.service', 'hifi-music.service', 'hifi-bubbleupnp.service', 'hifi-minimserver.service'):
             if name in services:
                 try:
                     systemctl('stop', name)
@@ -598,6 +725,8 @@ def apply_files(p, files, generation):
             old = dict(p)
             saved = root / 'deployment/state.json'
             if saved.exists():
+                for key in ('manager_public_domain', 'bubble_public_domain'):
+                    old.pop(key, None)
                 old.update(json.loads(saved.read_text()))
             oldcfg = json.loads(config.read_text())
             old['lan_ip'], port = oldcfg['browse_listen'].rsplit(':', 1)
@@ -607,8 +736,13 @@ def apply_files(p, files, generation):
             except Exception:
                 print('Rollback restored files; service recovery needs attention. Inspect journalctl --user.', file=sys.stderr)
         raise
-    return {'changed_files': [str(path) for path in changed], 'restarted_services': sorted(services),
-            'data_preserved': True, 'web_url': 'http://' + p['lan_ip'] + ':' + str(p['web_port'])}
+    result = {'changed_files': [str(path) for path in changed], 'restarted_services': sorted(services),
+              'data_preserved': True, 'web_url': manager_endpoint(p)[0]}
+    if p.get('manager_public_domain'):
+        result['public_web_url'] = 'https://' + p['manager_public_domain']
+    if p.get('bubble_public_domain'):
+        result['public_bubble_url'] = 'https://' + p['bubble_public_domain']
+    return result
 
 
 def main():

@@ -64,6 +64,10 @@ func (a *app) protect(next http.Handler) http.Handler {
 }
 
 func (a *app) protectManager(next http.Handler, auth *managerAuth, health func() managerHealth) http.Handler {
+	return a.protectManagerHost(next, auth, health, "")
+}
+
+func (a *app) protectManagerHost(next http.Handler, auth *managerAuth, health func() managerHealth, publicDomain string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -75,30 +79,37 @@ func (a *app) protectManager(next http.Handler, auth *managerAuth, health func()
 			host = h
 		}
 		host = strings.Trim(host, "[]")
-		if host != "localhost" && !a.allowedAddress(host) {
+		public := publicDomain != ""
+		if public && !strings.EqualFold(strings.TrimSuffix(r.Host, ":443"), publicDomain) ||
+			!public && host != "localhost" && !a.allowedAddress(host) {
 			problem(w, 403, errors.New("不允许此访问主机"))
 			return
 		}
 		remote, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil || !a.allowedAddress(remote) {
+		if err != nil || public && !loopbackAddress(remote) || !public && !a.allowedAddress(remote) {
 			problem(w, 403, errors.New("不允许此网络访问"))
 			return
 		}
 		if auth != nil && r.URL.Path == "/healthz" {
+			if public {
+				http.NotFound(w, r)
+				return
+			}
 			serveManagerHealth(w, r, health)
 			return
 		}
 		scheme := "http"
 		if r.TLS != nil {
 			scheme = "https"
-		} else if auth != nil && (!loopbackAddress(remote) || (host != "localhost" && !loopbackAddress(host))) {
+		} else if public || auth != nil && (!loopbackAddress(remote) || (host != "localhost" && !loopbackAddress(host))) {
 			problem(w, http.StatusForbidden, errors.New("局域网管理需要使用 HTTPS"))
 			return
 		}
 		if r.Method != "GET" && r.Method != "HEAD" {
 			if origin := r.Header.Get("Origin"); origin != "" {
 				u, e := url.Parse(origin)
-				if e != nil || u.Host != r.Host || u.Scheme != scheme {
+				if e != nil || u.Scheme != scheme ||
+					public && !strings.EqualFold(strings.TrimSuffix(u.Host, ":443"), publicDomain) || !public && u.Host != r.Host {
 					problem(w, 403, errors.New("请求来源不匹配"))
 					return
 				}

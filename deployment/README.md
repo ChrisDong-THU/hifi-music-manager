@@ -62,9 +62,12 @@ python deployment/deploy.py --device config/devices/local.json --apply
 | `lan_ip`、`lan_cidr` | 可信局域网；未指定时从 SSH 连接识别 |
 | `web_port`、`browse_port` | 管理和 UPnP 展示端口 |
 | `backend_description` | 仅自动发现不可用时显式指定本机 MinimServer 描述 URL |
-| `manage_bubble` | 可选管理已安装的 BubbleUPnP 服务，不提供公网隧道配置 |
+| `manage_bubble` | 可选管理已安装的 BubbleUPnP 服务 |
+| `manager_public_domain`、`bubble_public_domain` | 可选公网域名，对应独立的回环入口 |
 
 BubbleUPnP 如需启用，应按[官方文档](https://bubblesoftapps.com/bubbleupnpserver2/docs/any_install.html)单独安装到 `~/hifi/bubbleupnp/`。厂商许可和凭据由使用者准备。
+
+通过 ChmlFrp 发布管理 Web 或 BubbleUPnP 远程播放时，见[公网部署与验收](CHMLFRP.md)。
 
 ## 日常更新
 

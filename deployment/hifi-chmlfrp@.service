@@ -1,0 +1,15 @@
+[Unit]
+Description=HiFi ChmlFrp tunnel (%i)
+After=network-online.target hifi-manager.service hifi-bubble-relay.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.config/chmlfrp
+ExecStart=%h/.local/bin/chmlfrp -c %h/.config/chmlfrp/%i.ini
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
