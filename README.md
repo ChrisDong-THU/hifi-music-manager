@@ -25,7 +25,13 @@ Windows 在项目根目录执行：
 powershell -File scripts/update-manager-local.ps1
 ```
 
-打开 <http://127.0.0.1:8787>，在首页设置中选择系统已挂载的 USB 数据盘。初始化需要明确确认，不格式化磁盘，也不清理盘内其他目录。
+打开 <http://127.0.0.1:8787>。已有账号可直接登录。注册新账号时，在本机项目根目录为受邀账号签发邀请码：
+
+```powershell
+.\downloads\hifi-manager.exe -home .\downloads\manager-local -invite 受邀账号
+```
+
+从登录页点击「注册」，输入邀请码、签发时指定的账号和自设密码。邀请码 30 分钟内有效，只能使用一次。登录后可在首页选择系统已挂载的 USB 数据盘。初始化需要明确确认，不格式化磁盘，也不清理盘内其他目录。
 
 仅构建、不启动服务：
 
@@ -33,7 +39,7 @@ powershell -File scripts/update-manager-local.ps1
 powershell -File scripts/build-manager.ps1 -OutputDirectory downloads/manager-build
 ```
 
-Linux 或其他开发环境的直接启动方式见[开发指南](docs/DEVELOPMENT.md)。默认仅监听回环地址；局域网访问需显式配置可信网段，管理端口不应公开到互联网。
+Linux 或其他开发环境的直接启动方式见[开发指南](docs/DEVELOPMENT.md)。默认仅监听回环地址。局域网管理需要显式配置可信网段和 HTTPS，管理端口不应公开到互联网。
 
 ## 设备部署
 

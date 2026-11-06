@@ -24,6 +24,12 @@ go run . -home ../downloads/manager-local -listen 127.0.0.1:8787 -data-disks
 
 Windows 也可使用 `scripts/update-manager-local.ps1` 构建并后台更新，或 `scripts/start-manager-local.ps1` 启动已有程序。固定目录模式使用 `-FixedLocalStorage -DataDirectory 指定目录`，前台运行用 Ctrl+C 停止。
 
+管理服务首次启动时在服务目录的 `config/manager-invite.key` 创建仅服务用户可读的签发密钥。在服务所在机器运行 `hifi-manager -home 服务目录 -invite 受邀账号` 签发邀请码，设备模式也可用 `-library-home 服务目录`。邀请码绑定账号，30 分钟有效，成功注册即核销。注册的账号拥有完整管理权限。
+
+新密码至少 8 个字符，最多 256 字节。账号保存在服务目录的 `config/manager-auth.db`。同一账号在 5 分钟内输错密码 5 次后暂停登录 5 分钟，重启不会清除限制。会话在 12 小时后过期，服务重启也会使会话失效。
+
+回环地址支持本机 HTTP。其他地址需要 `-allow-lan`，并用 `-tls-cert` 和 `-tls-key` 指定浏览器信任的 PEM 证书与私钥。
+
 ## 检查
 
 ```console

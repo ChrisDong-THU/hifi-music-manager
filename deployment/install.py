@@ -9,11 +9,13 @@ import platform
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.request
+import urllib.error
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
@@ -195,12 +197,71 @@ def manager_busy(state):
         for job in state.get('jobs', [])))
 
 
+class ManagerRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+def manager_endpoint(p, validate_tls=False):
+    config = pathlib.Path(p['root']) / 'config'
+    cert, key = (config / name for name in ('manager-tls-cert.pem', 'manager-tls-key.pem'))
+    handlers = [urllib.request.ProxyHandler({}), ManagerRedirectHandler()]
+    scheme = 'http'
+    if cert.exists() or key.exists():
+        if not cert.is_file() or not key.is_file():
+            raise ValueError('Provide both manager-tls-cert.pem and manager-tls-key.pem')
+        if validate_tls:
+            server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_context.load_cert_chain(str(cert), str(key), password='')
+        ca = config / 'manager-tls-ca.pem'
+        context = ssl.create_default_context(cafile=str(ca) if ca.is_file() else None)
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+        scheme = 'https'
+    return scheme + '://' + p['lan_ip'] + ':' + str(p['web_port']), urllib.request.build_opener(*handlers)
+
+
+def manager_health(body):
+    state = json.loads(body.decode())
+    if (not isinstance(state, dict) or state.get('service') != 'hifi-manager' or not isinstance(state.get('busy'), bool)
+            or not isinstance(state.get('storage_ready'), bool)):
+        raise ValueError('Invalid manager health response')
+    return state
+
+
+def manager_port_busy(url, opener):
+    def read_busy(endpoint, client):
+        try:
+            with client.open(endpoint + '/healthz', timeout=3) as response:
+                return manager_health(response.read(4096))['busy']
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                raise
+            error.close()
+        with client.open(endpoint + '/api/state', timeout=3) as response:
+            state = json.loads(response.read(2 * 1024 * 1024).decode())
+        if not isinstance(state, dict) or 'music_path' not in state or 'stats' not in state:
+            raise ValueError('Port is occupied by another service: ' + endpoint)
+        return manager_busy(state)
+
+    try:
+        return read_busy(url, opener)
+    except urllib.error.URLError as error:
+        # The process already on the port may still speak HTTP during a TLS upgrade.
+        # Certificate errors must never trigger this read-only compatibility probe.
+        if (not url.startswith('https://') or not isinstance(error.reason, ssl.SSLError)
+                or getattr(error.reason, 'reason', None) != 'WRONG_VERSION_NUMBER'):
+            raise
+    plain_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), ManagerRedirectHandler())
+    return read_busy(url.replace('https://', 'http://', 1), plain_opener)
+
+
 def preflight(p):
     if platform.system() != 'Linux' or platform.machine() not in ('aarch64', 'x86_64'):
         raise ValueError('Target must be Linux ARM64 or x86_64')
     if os.getuid() == 0:
         raise ValueError('Run as the normal service owner, not root')
     root, volume = pathlib.Path(p['root']), pathlib.Path(p['volume'])
+    manager_url, manager_opener = manager_endpoint(p, validate_tls=True)
     generation = mount_identity(str(volume))
     inventory = json.loads(command('lsblk', '-J', '-p', '-o', 'NAME,TYPE,TRAN,MOUNTPOINT'))
     def usb(nodes, bus=''):
@@ -241,7 +302,7 @@ def preflight(p):
     if shutil.disk_usage(str(base)).free < 150 * 1024 * 1024:
         raise ValueError('Need at least 150 MiB free for staging and rollback')
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    for port, path, expected in ((p['web_port'], '/api/state', b'"music_path"'),
+    for port, path, expected in ((p['web_port'], '/healthz', b''),
                                  (p['browse_port'], '/device.xml', p.get('browse_udn', 'new-device').encode())):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             try:
@@ -250,16 +311,16 @@ def preflight(p):
             except OSError:
                 pass
         try:
-            with opener.open('http://' + p['lan_ip'] + ':' + str(port) + path, timeout=3) as response:
-                body = response.read(2 * 1024 * 1024)
-            if expected not in body:
-                raise ValueError('Port is occupied by another service: ' + str(port))
-            if path == '/api/state':
-                state = json.loads(body.decode())
-                if manager_busy(state):
+            if path == '/healthz':
+                if manager_port_busy(manager_url, manager_opener):
                     raise ValueError('Manager has uploads or active file jobs; retry deployment after they finish')
-        except OSError:
-            raise ValueError('Port is occupied but the existing service is not healthy: ' + str(port))
+            else:
+                with opener.open('http://' + p['lan_ip'] + ':' + str(port) + path, timeout=3) as response:
+                    body = response.read(2 * 1024 * 1024)
+                if expected not in body:
+                    raise ValueError('Port is occupied by another service: ' + str(port))
+        except OSError as error:
+            raise ValueError('Port {} is occupied but the existing service is not healthy: {}'.format(port, error)) from error
     return generation
 
 
@@ -347,9 +408,10 @@ def atomic(path, data, mode):
             os.unlink(temp)
 
 
-def wait_http(url, predicate=lambda body: bool(body), timeout=90):
+def wait_http(url, predicate=lambda body: bool(body), timeout=90, opener=None):
     deadline = time.monotonic() + timeout
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    if opener is None:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     while True:
         try:
             with opener.open(url, timeout=3) as response:
@@ -384,21 +446,21 @@ def active_library(root):
 
 def health(p):
     root = pathlib.Path(p['root'])
-    web='http://' + p['lan_ip'] + ':' + str(p['web_port']) + '/api/state'
-    wait_http(web,lambda b:'stats' in json.loads(b.decode()))
+    origin, web_opener = manager_endpoint(p)
+    web = origin + '/healthz'
+    wait_http(web, lambda b: bool(manager_health(b)), opener=web_opener)
     music = active_library(root)
     if music is None and mount_identity(p['volume']) is None:
         selected = [None]
         def waiting_for_disk(body):
-            state = json.loads(body.decode())
+            ready = manager_health(body)['storage_ready']
             live = active_library(root)
             if live:
-                ready = state.get('storage', {}).get('ready') is True and state.get('music_path') == live
                 if ready:
                     selected[0] = live
                 return ready
-            return state.get('storage', {}).get('ready') is False and not state.get('music_path')
-        wait_http(web, waiting_for_disk)
+            return not ready
+        wait_http(web, waiting_for_disk, opener=web_opener)
         music = selected[0]
         if music is None:
             return
@@ -413,10 +475,7 @@ def health(p):
     wait_http(browse + '/device.xml', lambda b: p['browse_udn'].encode() in b)
     wait_http(browse + '/upnp/content.xml', lambda b: b'Browse' in b)
     wait_http(browse + '/upnp/connection.xml', lambda b: b'GetProtocolInfo' in b)
-    def manager_ready(body):
-        state = json.loads(body.decode())
-        return ('tracks' in state.get('stats', {}) and state.get('music_path') == music)
-    wait_http('http://' + p['lan_ip'] + ':' + str(p['web_port']) + '/api/state', manager_ready)
+    wait_http(web, lambda b: manager_health(b)['storage_ready'], opener=web_opener)
     # Empty and populated libraries must both support a real ContentDirectory request.
     action = 'urn:schemas-upnp-org:service:ContentDirectory:1'
     soap = ('<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '

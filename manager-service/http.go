@@ -60,6 +60,10 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 func (a *app) protect(next http.Handler) http.Handler {
+	return a.protectManager(next, nil, nil)
+}
+
+func (a *app) protectManager(next http.Handler, auth *managerAuth, health func() managerHealth) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -80,14 +84,34 @@ func (a *app) protect(next http.Handler) http.Handler {
 			problem(w, 403, errors.New("不允许此网络访问"))
 			return
 		}
+		if auth != nil && r.URL.Path == "/healthz" {
+			serveManagerHealth(w, r, health)
+			return
+		}
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		} else if auth != nil && (!loopbackAddress(remote) || (host != "localhost" && !loopbackAddress(host))) {
+			problem(w, http.StatusForbidden, errors.New("局域网管理需要使用 HTTPS"))
+			return
+		}
 		if r.Method != "GET" && r.Method != "HEAD" {
 			if origin := r.Header.Get("Origin"); origin != "" {
 				u, e := url.Parse(origin)
-				if e != nil || u.Host != r.Host || u.Scheme != "http" {
+				if e != nil || u.Host != r.Host || u.Scheme != scheme {
 					problem(w, 403, errors.New("请求来源不匹配"))
 					return
 				}
 			}
+			if site := r.Header.Get("Sec-Fetch-Site"); auth != nil && (site == "cross-site" || site == "same-site") {
+				problem(w, 403, errors.New("请求来源不匹配"))
+				return
+			}
+		}
+		if auth != nil && !auth.allow(w, r, "hifi_auth_"+strings.TrimPrefix(a.cookieName, "hifi_session_")) {
+			return
+		}
+		if r.Method != "GET" && r.Method != "HEAD" {
 			cookie, e := r.Cookie(a.cookieName)
 			if e != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(a.csrf)) != 1 || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-CSRF-Token")), []byte(a.csrf)) != 1 {
 				problem(w, 403, errors.New("会话已过期，请刷新页面"))

@@ -3,9 +3,11 @@ import importlib.util
 import io
 import json
 import pathlib
+import ssl
 import tempfile
 import unittest
-from unittest.mock import patch
+import urllib.error
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 spec = importlib.util.spec_from_file_location('installer_safety', pathlib.Path(__file__).with_name('install.py'))
@@ -14,14 +16,38 @@ spec.loader.exec_module(installer)
 
 
 class PreflightSafetyTests(unittest.TestCase):
+    def test_manager_health_requires_an_object_with_boolean_flags(self):
+        for body in (b'null', b'[]', b'{"service":"hifi-manager","busy":1,"storage_ready":true}'):
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, 'Invalid manager health response'):
+                installer.manager_health(body)
+
+    def test_manager_tls_upgrade_checks_plain_health_before_legacy_state(self):
+        protocol_error = ssl.SSLError('wrong version number')
+        protocol_error.reason = 'WRONG_VERSION_NUMBER'
+        tls = Mock()
+        tls.open.side_effect = urllib.error.URLError(protocol_error)
+        plain = Mock()
+        plain.open.return_value = io.BytesIO(b'{"service":"hifi-manager","busy":true,"storage_ready":true}')
+        with patch.object(installer.urllib.request, 'build_opener', return_value=plain):
+            self.assertTrue(installer.manager_port_busy('https://192.168.1.5:8787', tls))
+        plain.open.assert_called_once_with('http://192.168.1.5:8787/healthz', timeout=3)
+
+    def test_manager_certificate_error_does_not_fall_back_to_http(self):
+        tls = Mock()
+        tls.open.side_effect = urllib.error.URLError(ssl.CertificateError('certificate mismatch'))
+        with patch.object(installer.urllib.request, 'build_opener') as build_opener:
+            with self.assertRaises(urllib.error.URLError):
+                installer.manager_port_busy('https://192.168.1.5:8787', tls)
+        build_opener.assert_not_called()
+
     def test_health_accepts_live_library_after_mount_path_changes(self):
         selected = '/media/new-mount/hifi-music-nano/music'
         p = dict(root='/home/service/hifi', volume='/media/old-mount', lan_ip='192.168.1.5',
                  web_port=8787, browse_port=9792, browse_udn='uuid:stable', manage_bubble=False,
                  backend_description='http://127.0.0.1:9791/native/Upnp/device.xml')
-        state = json.dumps(dict(stats=dict(tracks=0), music_path=selected, storage=dict(ready=True))).encode()
-        def wait(url, predicate):
-            body = state if url.endswith('/api/state') else b'ContentDirectory Browse GetProtocolInfo uuid:stable'
+        state = json.dumps(dict(service='hifi-manager', busy=False, storage_ready=True)).encode()
+        def wait(url, predicate, **kwargs):
+            body = state if url.endswith('/healthz') else b'ContentDirectory Browse GetProtocolInfo uuid:stable'
             self.assertTrue(predicate(body), url)
         opener = SimpleNamespace(open=lambda *a, **k: io.BytesIO(b'<r><TotalMatches>4</TotalMatches></r>'))
         for first in (selected, None):
@@ -60,16 +86,16 @@ class PreflightSafetyTests(unittest.TestCase):
 
     def test_offline_health_requires_web_to_report_no_active_storage(self):
         profile = dict(root='/home/service/hifi', volume='/media/missing', lan_ip='192.168.1.2', web_port=8787)
-        state = json.dumps(dict(stats={}, music_path='', storage=dict(ready=False))).encode()
+        state = json.dumps(dict(service='hifi-manager', busy=False, storage_ready=False)).encode()
         checked = []
-        def wait(url, predicate):
+        def wait(url, predicate, **kwargs):
             self.assertTrue(predicate(state))
             checked.append(url)
             if len(checked) == 2:
-                self.assertFalse(predicate(json.dumps(dict(stats={}, music_path='/stale', storage=dict(ready=True))).encode()))
+                self.assertFalse(predicate(json.dumps(dict(service='hifi-manager', busy=False, storage_ready=True)).encode()))
         with patch.object(installer, 'mount_identity', return_value=None), patch.object(installer, 'wait_http', side_effect=wait):
             installer.health(profile)
-        self.assertEqual(checked, ['http://192.168.1.2:8787/api/state'] * 2)
+        self.assertEqual(checked, ['http://192.168.1.2:8787/healthz'] * 2)
 
     def test_first_native_start_waits_for_discovery(self):
         with patch.object(installer, 'discover_backend', side_effect=[ValueError('starting'), 'ready']) as discover, patch.object(installer.time, 'sleep'):

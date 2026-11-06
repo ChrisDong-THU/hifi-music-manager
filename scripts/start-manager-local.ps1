@@ -1,6 +1,7 @@
 param([ValidateRange(1024,65535)][int]$Port = 8787, [string]$DataDirectory = '', [switch]$FixedLocalStorage, [switch]$Background)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'manager-local-lifecycle.ps1')
 if (-not $DataDirectory) { $DataDirectory = Join-Path $projectRoot 'downloads/manager-local' }
 $DataDirectory = [IO.Path]::GetFullPath($DataDirectory)
 $program = Join-Path $projectRoot 'downloads/hifi-manager.exe'
@@ -27,8 +28,9 @@ if ($Background) {
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         if ($process.HasExited) { throw "Manager exited. See $DataDirectory/server.stderr.log" }
         try {
-            $state = Invoke-RestMethod "http://127.0.0.1:$Port/api/state" -TimeoutSec 2
-            if ($state.csrf -and $null -ne $state.stats) { Write-Output "Ready (PID $($process.Id))"; return }
+            $null = Get-ManagerLocalHealth -Port $Port -TimeoutSec 2
+            Write-Output "Ready (PID $($process.Id))"
+            return
         } catch { }
         Start-Sleep -Milliseconds 250
     }

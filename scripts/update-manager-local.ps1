@@ -29,8 +29,8 @@ if ($existing.Count -eq 1) {
     if ($existing[0].CommandLine -notmatch $homePattern -or $diskManaged -eq [bool]$FixedLocalStorage) {
         throw 'The running manager uses different storage settings; stop it explicitly before changing modes or directories'
     }
-    $state = Invoke-RestMethod "http://127.0.0.1:$Port/api/state" -TimeoutSec 5
-    if (@($state.jobs | Where-Object { $_.kind -ne 'sync' -and $_.state -in @('queued','running') }).Count -or $state.active_mutations -gt 0) {
+    $health = Get-ManagerLocalHealth -Port $Port -TimeoutSec 5
+    if ($health.busy) {
         throw 'Wait for uploads and file tasks to finish before updating'
     }
     Stop-Process -Id $existing[0].ProcessId

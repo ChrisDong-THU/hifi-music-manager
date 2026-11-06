@@ -224,12 +224,12 @@ func (c *diskController) applyDiskSelection(ctx context.Context, in diskSelectio
 	return id, nil
 }
 
-func (c *diskController) offlineState(w http.ResponseWriter, status string) {
+func (c *diskController) offlineState(w http.ResponseWriter, r *http.Request, status string) {
 	mode := "local"
 	if c.security.lan.IsValid() {
 		mode = "lan"
 	}
-	http.SetCookie(w, &http.Cookie{Name: c.security.cookieName, Value: c.security.csrf, HttpOnly: true, SameSite: http.SameSiteStrictMode, Path: "/"})
+	http.SetCookie(w, &http.Cookie{Name: c.security.cookieName, Value: c.security.csrf, HttpOnly: true, SameSite: http.SameSiteStrictMode, Path: "/", Secure: r.TLS != nil})
 	w.Header().Set("Cache-Control", "no-store")
 	respond(w, serviceState{CSRF: c.security.csrf, Mode: mode, Operations: []Operation{}, Jobs: c.diskTasks(), Storage: &storageInfo{Message: status}})
 }
@@ -265,7 +265,7 @@ func (c *diskController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.mu.RUnlock()
 	if !ready {
 		if r.Method == "GET" && r.URL.Path == "/api/state" {
-			c.offlineState(w, status)
+			c.offlineState(w, r, status)
 			return
 		}
 		problem(w, 503, errors.New("数据盘尚未就绪，请在主页设置中选择数据盘"))
@@ -412,7 +412,12 @@ func (c *diskController) currentSelection(ctx context.Context) (librarySelection
 	return librarySelection{}, errors.New("等待指定数据盘就绪")
 }
 
-func runDiskManager(ctx context.Context, project, listen string, lan netip.Prefix, rescanURL string, standalone bool) error {
+func runDiskManager(ctx context.Context, project, listen string, lan netip.Prefix, rescanURL string, standalone bool, transport managerTLS) error {
+	auth, err := openManagerAuth(project)
+	if err != nil {
+		return err
+	}
+	defer auth.db.Close()
 	key := sha256.Sum256([]byte(project))
 	security := &app{csrf: uid(), cookieName: "hifi_session_" + hex.EncodeToString(key[:6]), lan: lan}
 	c := &diskController{project: project, security: security, site: staticSite(), status: "请选择数据盘", wake: make(chan struct{}, 1), list: library.ListDrives, mounted: library.Mounted}
@@ -451,7 +456,8 @@ func runDiskManager(ctx context.Context, project, listen string, lan netip.Prefi
 		c.workers.Wait()
 		<-done
 	}()
-	server := &http.Server{Addr: listen, Handler: requestBodyTimeout(security.protect(c), 2*time.Minute), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	handler := security.protectManager(c, auth, c.health)
+	server := &http.Server{Addr: listen, Handler: requestBodyTimeout(handler, 2*time.Minute), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	l, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
@@ -464,8 +470,8 @@ func runDiskManager(ctx context.Context, project, listen string, lan netip.Prefi
 			server.Close()
 		}
 	}()
-	log.Printf("hifi-music-nano · http://%s", listen)
-	err = server.Serve(l)
+	log.Printf("hifi-music-nano · %s://%s", transport.scheme(), listen)
+	err = transport.serve(server, l)
 	if err == http.ErrServerClosed {
 		return nil
 	}

@@ -67,7 +67,7 @@ func (a *app) state(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("ETag", tag)
-	http.SetCookie(w, &http.Cookie{Name: a.cookieName, Value: a.csrf, HttpOnly: true, SameSite: http.SameSiteStrictMode, Path: "/"})
+	http.SetCookie(w, &http.Cookie{Name: a.cookieName, Value: a.csrf, HttpOnly: true, SameSite: http.SameSiteStrictMode, Path: "/", Secure: r.TLS != nil})
 	if r.Header.Get("If-None-Match") == tag {
 		w.WriteHeader(http.StatusNotModified)
 		return

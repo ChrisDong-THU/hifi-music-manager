@@ -64,3 +64,24 @@ function Install-ManagerArtifacts {
         if (Test-Path -LiteralPath $item.Backup) { Remove-Item -LiteralPath $item.Backup -ErrorAction Stop }
     }
 }
+
+function Get-ManagerLocalHealth {
+    param([int]$Port, [int]$TimeoutSec)
+    $origin = "http://127.0.0.1:$Port"
+    try {
+        $health = Invoke-RestMethod "$origin/healthz" -TimeoutSec $TimeoutSec
+        if ($health.service -ne 'hifi-manager' -or $health.busy -isnot [bool]) {
+            throw 'Unexpected manager health response'
+        }
+        return $health
+    } catch {
+        if ($null -eq $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 404) { throw }
+    }
+    # A pre-login build can still be running during a local update or rollback.
+    $state = Invoke-RestMethod "$origin/api/state" -TimeoutSec $TimeoutSec
+    if (-not $state.csrf -or $null -eq $state.stats) { throw 'Unexpected manager state response' }
+    return @{
+        busy = ($state.active_mutations -gt 0 -or
+            @($state.jobs | Where-Object { $_.kind -ne 'sync' -and $_.state -in @('queued','running') }).Count -gt 0)
+    }
+}

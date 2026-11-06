@@ -4,9 +4,13 @@ API 与内嵌前端共同构建。接口返回 JSON，错误为 `{error}`；后�
 
 ## 会话
 
-`GET /api/state` 返回服务 Cookie、CSRF 和 `library_session`。修改请求携带 Cookie、`X-CSRF-Token` 与 `X-Library-Session`；查询也绑定当前盘上下文。原生音频、封面 URL 使用 `library_session` 查询参数。
+`GET /api/auth/status` 返回 `{authenticated}`。`POST /api/auth/register` 接受 `{username, password, invite_code}`，注册时核销绑定账号且未过期的邀请码。`POST /api/auth/login` 接受 `{username, password}`。注册和登录成功后，服务通过 HttpOnly Cookie 建立会话。认证请求使用同源 JSON，局域网管理使用 HTTPS。
 
-换盘、重挂或服务重启后，旧会话不可继续使用。CSRF、来源和可信网段校验独立生效。
+密码按原样作为字符串传递。新密码至少 8 个字符，最多 256 字节。同一账号在 5 分钟内登录失败 5 次后，该账号暂停登录 5 分钟；其他账号及已有会话不受影响。限流响应返回 429 和 `Retry-After`。
+
+管理 API、封面和音频要求有效的登录 Cookie。登录后 `GET /api/state` 返回 CSRF Cookie、令牌和 `library_session`。修改请求携带 Cookie、`X-CSRF-Token` 与 `X-Library-Session`，查询也绑定当前盘上下文。原生音频和封面请求使用 `library_session` 查询参数。
+
+换盘或重挂会更换曲库会话，服务重启会清除登录会话。`GET /healthz` 无需登录，只提供服务名、任务是否繁忙和存储是否就绪，用于启动与安全更新检查。
 
 ## 控制与草稿
 

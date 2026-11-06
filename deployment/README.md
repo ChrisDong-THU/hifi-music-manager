@@ -23,7 +23,7 @@ Linux 目标设备需要：
    ./hifi-manager -home ~/hifi -listen 127.0.0.1:8787 -data-disks
    ```
 
-   通过 SSH 本地转发访问设置（例如 `ssh -L 18787:127.0.0.1:8787 music-server`），在 <http://127.0.0.1:18787> 确认初始化并选盘，再用 Ctrl+C 停止这个临时管理实例。不要手动创建未带盘标识的项目子目录。
+   通过 SSH 本地转发访问设置（例如 `ssh -L 18787:127.0.0.1:8787 music-server`）。注册新账号时，在设备上运行 `./hifi-manager -home ~/hifi -invite 受邀账号`，然后在 <http://127.0.0.1:18787> 点击「注册」并填入指定账号和邀请码。登录后确认初始化并选盘，再用 Ctrl+C 停止这个临时管理实例。不要手动创建未带盘标识的项目子目录。
 2. 创建指向已初始化音乐目录的 `~/hifi/music` 符号链接；已有入口应先检查，不覆盖普通目录。将 MinimServer 官方程序安装到 `~/hifi/minimserver/`，运行厂商 `bin/startc`，将内容目录设为 `~/hifi/music` 的完整绝对路径，完成许可和初始配置后正常退出。不要复制其他设备的数据目录或身份，也不另启厂商自动启动方式。如使用独立 Java，配置 `java_home`。
 3. 从 [example.json](../config/devices/example.json) 复制本机设备配置，例如 `config/devices/local.json`：
 
@@ -50,7 +50,9 @@ python deployment/deploy.py --device config/devices/local.json --check
 python deployment/deploy.py --device config/devices/local.json --apply
 ```
 
-在管理 Web 设置中选择数据盘。未初始化盘需明确确认，已选盘缺席时不会自动替换。MinimServer 未就绪或空盘未初始化时，控制页面仍可用于选盘。
+局域网管理使用 HTTPS。启动设备服务前，在设备服务目录的 `config/` 放置 `manager-tls-cert.pem` 和仅服务用户可读的 `manager-tls-key.pem`。证书须覆盖实际访问的 IP。使用私有 CA 时，在浏览器端信任该 CA，并把 CA 证书保存为设备上的 `config/manager-tls-ca.pem`，供部署检查验证。
+
+登录后在管理 Web 设置中选择数据盘。未初始化盘需明确确认，已选盘缺席时不会自动替换。MinimServer 未就绪或空盘未初始化时，控制页面仍可用于选盘。
 
 ## 配置项
 

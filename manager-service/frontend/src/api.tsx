@@ -53,7 +53,13 @@ const LibraryStateContext = createContext<{
   scanning: boolean;
 } | null>(null);
 
-export function AppProvider({ children }: { children: ReactNode }) {
+export function AppProvider({
+  children,
+  onSessionExpired,
+}: {
+  children: ReactNode;
+  onSessionExpired: () => void;
+}) {
   const [state, setState] = useState<State | null>(null),
     [error, setError] = useState("");
   const { begin, start, update, dismiss, notify } = useNotifications();
@@ -80,6 +86,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const token = useRef(""),
     etag = useRef(""),
     storageScope = useRef("");
+  const pollController = useRef<AbortController | null>(null);
   const session = state?.library_session || "";
   const { request, query } = useMemo(
     () =>
@@ -93,16 +100,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const refreshQueue = useMemo(
     () =>
       createRefreshQueue(async () => {
+        const controller = pollController.current;
+        if (!controller || controller.signal.aborted) return;
         try {
           const response = await apiFetch("state", undefined, token.current, {
             etag: etag.current,
+            signal: controller.signal,
           });
+          if (controller.signal.aborted) return;
+          if (response.status === 401) {
+            controller.abort();
+            onSessionExpired();
+            return;
+          }
           if (response.status === 304) {
             setError("");
             jobs.reportCurrent();
             return;
           }
           const next = await jsonResponse<State>(response);
+          if (controller.signal.aborted) return;
           const scope = next.library_session || "";
           if (storageScope.current !== scope) jobs.switchScope(next.jobs);
           storageScope.current = scope;
@@ -112,10 +129,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
           jobs.report(next.jobs);
           setState(next);
         } catch (e) {
-          setError(e instanceof Error ? e.message : "连接失败");
+          if (!controller.signal.aborted) {
+            setError(e instanceof Error ? e.message : "连接失败");
+          }
         }
       }),
-    [jobs],
+    [jobs, onSessionExpired],
   );
   const { refresh, poll } = refreshQueue;
   const enqueue = useCallback(
@@ -135,6 +154,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [notify],
   );
   useEffect(() => {
+    const controller = new AbortController();
+    pollController.current = controller;
     void poll();
     const timer = window.setInterval(() => {
       if (!document.hidden) void poll();
@@ -144,6 +165,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
     document.addEventListener("visibilitychange", visibility);
     return () => {
+      controller.abort();
       clearInterval(timer);
       document.removeEventListener("visibilitychange", visibility);
     };

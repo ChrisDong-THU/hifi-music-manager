@@ -94,6 +94,9 @@ def start(service, home, web_port, timeout=120):
         executable = str(root / 'manager-service/hifi-manager')
         args = [executable, '-library-home', str(root), '-listen', address + ':' + str(web_port),
                 '-allow-lan', str(network), '-rescan-url', 'http://127.0.0.1:9790/']
+        cert, key = (root / 'config' / name for name in ('manager-tls-cert.pem', 'manager-tls-key.pem'))
+        if cert.exists() or key.exists():
+            args += ['-tls-cert', str(cert), '-tls-key', str(key)]
     print('Starting ' + service + ' on ' + address, flush=True)
     os.execv(executable, args)
 

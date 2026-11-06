@@ -44,3 +44,8 @@ func (a *app) allowedAddress(host string) bool {
 	ip = ip.Unmap()
 	return ip.IsLoopback() || (a.lan.IsValid() && a.lan.Contains(ip))
 }
+
+func loopbackAddress(host string) bool {
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.Unmap().IsLoopback()
+}

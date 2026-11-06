@@ -191,14 +191,16 @@ const pageThemes = {
 
 export default function ThemeProvider({
   children,
+  pageOverride,
 }: {
   children: React.ReactNode;
+  pageOverride?: keyof typeof pageThemes;
 }) {
   const { path } = useRoute();
   const page = Object.hasOwn(pageThemes, path)
     ? (path as keyof typeof pageThemes)
     : "home";
-  const theme = pageThemes[page];
+  const theme = pageThemes[pageOverride ?? page];
   const accent = theme.palette.primary;
   return (
     <StyledEngineProvider injectFirst>
