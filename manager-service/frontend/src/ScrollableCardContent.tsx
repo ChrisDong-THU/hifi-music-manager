@@ -1,4 +1,4 @@
-import { CardContent } from "@mui/material";
+import { CardContent, type SxProps, type Theme } from "@mui/material";
 import type { ReactNode } from "react";
 
 /** Shared spacing, keyboard focus and scrollbar behavior for bounded lists. */
@@ -8,6 +8,7 @@ export function ScrollableCardContent({
   hidden,
   relayBeat,
   className = "",
+  sx = { px: { mobile: 0.5, tablet: 1 }, pt: 1.5, mt: 1, pb: "0!important" },
   children,
 }: {
   label: string;
@@ -15,6 +16,7 @@ export function ScrollableCardContent({
   hidden?: boolean;
   relayBeat?: number;
   className?: string;
+  sx?: SxProps<Theme>;
   children: ReactNode;
 }) {
   return (
@@ -26,7 +28,7 @@ export function ScrollableCardContent({
       role="region"
       aria-label={label}
       tabIndex={0}
-      sx={{ px: { mobile: 0.5, tablet: 1 }, pt: 1.5, mt: 1, pb: "0!important" }}
+      sx={sx}
     >
       {children}
     </CardContent>

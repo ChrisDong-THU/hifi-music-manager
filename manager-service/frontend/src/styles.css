@@ -1904,11 +1904,6 @@ svg {
 .search-pane-body {
   display: flex;
   flex-direction: column;
-  padding: 8px;
-  min-height: 0;
-  overflow: auto;
-  flex: 1;
-  scrollbar-width: thin;
 }
 .search-pane-body > * {
   flex-shrink: 0;

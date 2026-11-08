@@ -29,6 +29,7 @@ import { Cover } from "./Cover";
 import { HiResBadge } from "./HiResBadge";
 import { Empty, IconAction, LoadError } from "./components";
 import { ArtistPortrait } from "./ArtistPortrait";
+import { ScrollableCardContent } from "./ScrollableCardContent";
 import { useContentRelay } from "./useContentRelay";
 
 export type SearchStage = "artists" | "albums" | "tracks" | "details";
@@ -71,7 +72,14 @@ function SearchPane({
           </Typography>
         ) : null}
       </Box>
-      <Box className="search-pane-body" data-relay-beat="3">{children}</Box>
+      <ScrollableCardContent
+        className="search-pane-body"
+        label={`${heading.title}内容`}
+        relayBeat={3}
+        sx={{ p: 1, "&:last-child": { pb: 1 } }}
+      >
+        {children}
+      </ScrollableCardContent>
       {footer ? <Box className="search-pane-footer" data-relay-beat="4">{footer}</Box> : null}
     </Card>
   );
