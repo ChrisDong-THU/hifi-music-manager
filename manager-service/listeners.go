@@ -23,11 +23,19 @@ type managerEndpoint struct {
 	listen       string
 	cert, key    string
 	publicDomain string
+	lanHostname  string
 }
 
 func managerEndpoints(local managerEndpoint, domain, cert, key string) ([]managerEndpoint, error) {
 	if (local.cert == "") != (local.key == "") {
 		return nil, errors.New("tls-cert 和 tls-key 必须一起指定")
+	}
+	if local.lanHostname != "" {
+		local.lanHostname = strings.ToLower(local.lanHostname)
+		if len(local.lanHostname) > 253 || !managerDomainPattern.MatchString(local.lanHostname) ||
+			!strings.HasSuffix(local.lanHostname, ".local") || local.cert == "" {
+			return nil, errors.New("lan-hostname 需要 .local 主机名和局域网 HTTPS 证书")
+		}
 	}
 	if domain == "" && cert == "" && key == "" {
 		return []managerEndpoint{local}, nil
@@ -45,7 +53,7 @@ func serveManager(ctx context.Context, endpoints []managerEndpoint, gate *app, n
 	}
 	var bound []boundEndpoint
 	for _, endpoint := range endpoints {
-		handler := gate.protectManager(next, auth, health, endpoint.publicDomain)
+		handler := gate.protectManager(next, auth, health, endpoint.publicDomain, endpoint.lanHostname)
 		server := &http.Server{Addr: endpoint.listen, Handler: requestBodyTimeout(handler, 2*time.Minute),
 			ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 		if endpoint.cert != "" {
@@ -53,13 +61,17 @@ func serveManager(ctx context.Context, endpoints []managerEndpoint, gate *app, n
 			if err != nil {
 				return fmt.Errorf("加载 %s 的管理 HTTPS 证书：%w", endpoint.listen, err)
 			}
-			if endpoint.publicDomain != "" {
+			name := endpoint.publicDomain
+			if name == "" {
+				name = endpoint.lanHostname
+			}
+			if name != "" {
 				leaf, err := x509.ParseCertificate(pair.Certificate[0])
 				if err != nil {
 					return err
 				}
-				if err := leaf.VerifyHostname(endpoint.publicDomain); err != nil {
-					return fmt.Errorf("管理 HTTPS 证书不覆盖公网域名：%w", err)
+				if err := leaf.VerifyHostname(name); err != nil {
+					return fmt.Errorf("管理 HTTPS 证书不覆盖 %s：%w", name, err)
 				}
 			}
 			server.TLSConfig = &tls.Config{Certificates: []tls.Certificate{pair}}

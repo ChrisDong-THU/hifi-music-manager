@@ -29,7 +29,9 @@ class DeploymentTests(unittest.TestCase):
             self.assertIn('deployment/launch-service.py', text)
         launcher = self.root / 'deployment/launch-service.py'
         self.assertIn(launcher, files)
-        self.assertEqual(installer.restart_set([launcher]), {'hifi-music.service', 'hifi-manager.service'})
+        self.assertEqual(installer.restart_set([launcher]), {'hifi-music.service', 'hifi-manager.service', installer.LAN_REBIND})
+        watcher = files[self.home / '.config/systemd/user' / installer.LAN_REBIND][0].decode()
+        self.assertIn('launch-service.py watch ', watcher)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -51,13 +53,13 @@ class DeploymentTests(unittest.TestCase):
         self.calls.append(args)
         return 'enabled' if args[0] == 'is-enabled' else ''
 
-    def apply(self, files, health=None):
+    def apply(self, files, health=None, reinstall=False):
         with patch.object(installer, 'systemctl', side_effect=self.systemctl), \
              patch.object(installer, 'command', return_value='valid'), \
              patch.object(installer, 'mount_identity', return_value='mount-a'), \
              patch.object(installer, 'activate', side_effect=lambda p, s: self.calls.append(('activate', sorted(s)))), \
              patch.object(installer, 'health', side_effect=health):
-            return installer.apply_files(self.profile, files, 'mount-a')
+            return installer.apply_files(self.profile, files, 'mount-a', reinstall=reinstall)
 
     def test_fresh_install_then_identical_update_does_not_restart(self):
         files = installer.render(self.profile)
@@ -70,6 +72,19 @@ class DeploymentTests(unittest.TestCase):
         second = self.apply(files)
         self.assertEqual(second['changed_files'], [])
         self.assertEqual(second['restarted_services'], [])
+
+    def test_reinstall_stops_existing_services_and_replaces_identical_artifacts(self):
+        files = installer.render(self.profile)
+        binary = self.root / 'manager-service/hifi-manager'
+        files[binary] = (b'manager program', 0o755)
+        self.apply(files)
+        with binary.open('rb') as old:
+            self.calls.clear()
+            result = self.apply(files, reinstall=True)
+            self.assertNotEqual(os.fstat(old.fileno()).st_ino, binary.stat().st_ino)
+        self.assertEqual(set(result['changed_files']), {str(path) for path in files})
+        self.assertLess(self.calls.index(('stop', 'hifi-manager.service')), self.calls.index(('daemon-reload',)))
+        self.assertIn(('activate', []), self.calls)
 
     def test_failed_health_restores_executables_config_and_preserves_data(self):
         files = installer.render(self.profile)
@@ -91,7 +106,7 @@ class DeploymentTests(unittest.TestCase):
         old_config = config.read_bytes()
         updated[config] = (b'{"bad":"configuration"}', 0o600)
         with self.assertRaisesRegex(RuntimeError, 'not ready'):
-            self.apply(updated, health=RuntimeError('not ready'))
+            self.apply(updated, health=RuntimeError('not ready'), reinstall=True)
         self.assertEqual(binary.read_bytes(), b'old program')
 
         self.assertEqual(config.read_bytes(), old_config)

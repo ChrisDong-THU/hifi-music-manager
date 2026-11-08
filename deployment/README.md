@@ -52,6 +52,10 @@ python deployment/deploy.py --device config/devices/local.json --apply
 
 局域网管理使用 HTTPS。启动设备服务前，在设备服务目录的 `config/` 放置 `manager-tls-cert.pem` 和仅服务用户可读的 `manager-tls-key.pem`。证书须覆盖实际访问的 IP。使用私有 CA 时，在浏览器端信任该 CA，并把 CA 证书保存为设备上的 `config/manager-tls-ca.pem`，供部署检查验证。
 
+如果路由器会重新分配地址，可以在设备配置中设置 `manager_lan_hostname`，例如 `nano.local`。确认设备通过 Avahi 广播该名称后，使用覆盖这个 DNS 名称的 `manager-lan-tls-cert.pem`、`manager-lan-tls-key.pem` 和 `manager-lan-tls-ca.pem`，把管理地址保存为 `https://nano.local:8787`。客户端只需在首次使用时信任该 CA，后续地址变化无需重新签发证书。启用此设置前，先确认管理端没有上传或文件任务，再停止仍提供旧 IP 证书的管理进程以完成首次切换。
+
+`hifi-lan-rebind.service` 会在开机时启动，监听 Linux 的网卡、IPv4 地址和路由变化。可信网段内的实际地址变更后，它会重启仍绑定旧地址的 HiFi 服务。恢复期间，管理连接和正在播放的流可能需要重新连接。
+
 登录后在管理 Web 设置中选择数据盘。未初始化盘需明确确认，已选盘缺席时不会自动替换。MinimServer 未就绪或空盘未初始化时，控制页面仍可用于选盘。
 
 ## 配置项
@@ -77,6 +81,8 @@ python deployment/deploy.py --device config/devices/local.json --apply
 ```
 
 `--check` 只读，不构建或上传；`--apply` 先预检，再构建与安装。预检拒绝活动上传和文件任务，校验架构、网段、端口、目录及挂载代次。未变化的程序不重复上传；验收失败恢复本次替换的程序、配置和 unit，不恢复或覆盖用户数据。
+
+需要完整重装设备上的项目部署时，将 `--apply` 换为 `--reinstall`。安装器先校验安装包，再停止并重新安装它管理的程序、启动脚本和 systemd unit，最后运行就绪检查。曲库、管理数据库、账号、证书与第三方服务配置保留。
 
 仅构建离线包，不连接设备：
 

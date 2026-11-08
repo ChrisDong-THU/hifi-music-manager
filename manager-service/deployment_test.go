@@ -30,7 +30,7 @@ func TestManagerPublicEndpointRetainsAuthentication(t *testing.T) {
 	gate := &app{lan: netip.MustParsePrefix("192.168.1.0/24"), csrf: "csrf-token", cookieName: "hifi_session_test"}
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	health := func() managerHealth { return managerHealth{} }
-	public := gate.protectManager(next, auth, health, domain)
+	public := gate.protectManager(next, auth, health, domain, "")
 	request := func(handler http.Handler, scheme, host, remote, method, path, origin string, authCookie *http.Cookie, csrf bool) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, scheme+"://"+host+path, strings.NewReader(`{"username":"owner","password":"A fixture password"}`))
 		r.RemoteAddr = remote
@@ -68,8 +68,23 @@ func TestManagerPublicEndpointRetainsAuthentication(t *testing.T) {
 			t.Fatalf("%+v: got %d", test, w.Code)
 		}
 	}
-	if w := request(gate.protectManager(next, auth, health, ""), "https", domain, loopback, "GET", "/", "", nil, false); w.Code != 403 {
+	if w := request(gate.protectManager(next, auth, health, "", ""), "https", domain, loopback, "GET", "/", "", nil, false); w.Code != 403 {
 		t.Fatal("LAN listener accepted the public host")
+	}
+	lan := gate.protectManager(next, auth, health, "", "nano.local")
+	for _, test := range []struct {
+		scheme, host, remote, origin string
+		want                         int
+	}{
+		{"https", "nano.local:8787", "192.168.1.4:1234", "https://nano.local:8787", 200},
+		{"http", "nano.local:8787", "192.168.1.4:1234", "", 403},
+		{"https", "other.local:8787", "192.168.1.4:1234", "", 403},
+		{"https", "nano.local:8787", "192.168.2.4:1234", "", 403},
+		{"https", "nano.local:8787", "192.168.1.4:1234", "https://other.local:8787", 403},
+	} {
+		if w := request(lan, test.scheme, test.host, test.remote, "POST", "/api/auth/login", test.origin, nil, false); w.Code != test.want {
+			t.Fatalf("LAN %+v: got %d", test, w.Code)
+		}
 	}
 	login := request(public, "https", domain+":443", loopback, "POST", "/api/auth/login", "https://"+domain, nil, false)
 	cookies := login.Result().Cookies()

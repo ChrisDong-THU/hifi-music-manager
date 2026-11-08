@@ -24,7 +24,7 @@ func TestManagerAuthenticationLifecycle(t *testing.T) {
 	gate := &app{cookieName: "csrf", csrf: "legacy-token"}
 	handler := gate.protectManager(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
-	}), auth, func() managerHealth { return managerHealth{Service: "hifi-manager"} }, "")
+	}), auth, func() managerHealth { return managerHealth{Service: "hifi-manager"} }, "", "")
 
 	request := func(method, path, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
 		t.Helper()
@@ -111,7 +111,7 @@ func TestManagerAuthenticationLifecycle(t *testing.T) {
 	defer reopened.db.Close()
 	handler = gate.protectManager(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
-	}), reopened, func() managerHealth { return managerHealth{Service: "hifi-manager"} }, "")
+	}), reopened, func() managerHealth { return managerHealth{Service: "hifi-manager"} }, "", "")
 	expect(request(http.MethodGet, "/api/state", "", cookie), http.StatusUnauthorized)
 	expect(register("owner", password, code), http.StatusConflict)
 	ownerLogin := request(http.MethodPost, "/api/auth/login", registration("owner", password, ""), nil)
@@ -137,7 +137,7 @@ func TestManagerAuthenticationTransportAndRateLimit(t *testing.T) {
 	}
 	auth.loginLimits["owner"] = managerLoginLimit{Failures: loginMaxFailures - 1, WindowUntil: time.Now().Add(loginCooldown)}
 	gate := &app{lan: netip.MustParsePrefix("192.168.10.0/24")}
-	handler := gate.protectManager(http.NotFoundHandler(), auth, func() managerHealth { return managerHealth{} }, "")
+	handler := gate.protectManager(http.NotFoundHandler(), auth, func() managerHealth { return managerHealth{} }, "", "")
 	request := func(scheme, origin, contentType, username, password string) *httptest.ResponseRecorder {
 		body, _ := json.Marshal(managerCredentials{Username: username, Password: password})
 		r := httptest.NewRequest(http.MethodPost, scheme+"://192.168.10.4:8787/api/auth/login", strings.NewReader(string(body)))

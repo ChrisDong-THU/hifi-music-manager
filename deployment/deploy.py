@@ -136,6 +136,7 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--check', action='store_true', help='read-only target preflight; no build or upload')
     mode.add_argument('--apply', action='store_true', help='build, install, start and verify; preserve all data')
+    mode.add_argument('--reinstall', action='store_true', help='stop and replace the managed deployment; preserve all data')
     mode.add_argument('--prepare-minim', action='store_true', help='first install: register the initialized MinimServer as a user service')
     mode.add_argument('--build', choices=('arm64', 'amd64'), help='build a reusable offline bundle only')
     args = parser.parse_args()
@@ -161,7 +162,7 @@ def main():
     profile = json.dumps(checked['profile'], separators=(',', ':'))
     with zipfile.ZipFile(str(bundle)) as archive:
         manifest = json.loads(archive.read('manifest.json').decode())
-    if checked['binary_sha256'] == manifest['files']:
+    if not args.reinstall and checked['binary_sha256'] == manifest['files']:
         print('Executables unchanged; skipping file transfer.', file=sys.stderr)
         result = json.loads(remote(device['ssh'], ['python3', '-', '--profile-json', profile,
                     '--reuse-manifest', json.dumps(manifest), '--apply'], script))
@@ -176,8 +177,10 @@ def main():
         raise RuntimeError('Unexpected remote staging directory')
     try:
         run(['scp'] + SSH_OPTIONS + [bundle, device['ssh'] + ':' + staging + '/bundle.zip'])
-        result = json.loads(remote(device['ssh'], ['python3', '-', '--profile-json', profile,
-                                                  '--bundle', staging + '/bundle.zip', '--apply'], script))
+        command = ['python3', '-', '--profile-json', profile, '--bundle', staging + '/bundle.zip', '--apply']
+        if args.reinstall:
+            command.append('--reinstall')
+        result = json.loads(remote(device['ssh'], command, script))
         result['elapsed_seconds'] = round(time.monotonic() - started, 2)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     finally:

@@ -59,7 +59,7 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	}
 	return true
 }
-func (a *app) protectManager(next http.Handler, auth *managerAuth, health func() managerHealth, publicDomain string) http.Handler {
+func (a *app) protectManager(next http.Handler, auth *managerAuth, health func() managerHealth, publicDomain, lanHostname string) http.Handler {
 	public := publicDomain != ""
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -72,8 +72,9 @@ func (a *app) protectManager(next http.Handler, auth *managerAuth, health func()
 			host = h
 		}
 		host = strings.Trim(host, "[]")
+		lanName := lanHostname != "" && strings.EqualFold(host, lanHostname)
 		if public && !strings.EqualFold(strings.TrimSuffix(r.Host, ":443"), publicDomain) ||
-			!public && host != "localhost" && !a.allowedAddress(host) {
+			!public && host != "localhost" && !lanName && !a.allowedAddress(host) {
 			problem(w, 403, errors.New("不允许此访问主机"))
 			return
 		}

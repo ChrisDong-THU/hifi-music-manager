@@ -12,7 +12,7 @@ import (
 )
 
 func (a *app) protect(next http.Handler) http.Handler {
-	return a.protectManager(next, nil, nil, "")
+	return a.protectManager(next, nil, nil, "", "")
 }
 
 // Fixtures use the production write boundary, including its cache revision.

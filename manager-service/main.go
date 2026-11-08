@@ -33,6 +33,7 @@ func run() error {
 	lan := flag.String("allow-lan", "", "optional private LAN CIDR")
 	cert := flag.String("tls-cert", "", "PEM certificate for HTTPS management")
 	key := flag.String("tls-key", "", "PEM private key for HTTPS management")
+	lanHostname := flag.String("lan-hostname", "", "optional .local hostname for the LAN HTTPS endpoint")
 	publicDomain := flag.String("public-domain", "", "optional HTTPS management domain for the local FRP endpoint")
 	publicCert := flag.String("public-tls-cert", "", "PEM certificate chain for the public management domain")
 	publicKey := flag.String("public-tls-key", "", "PEM private key for the public management domain")
@@ -49,7 +50,7 @@ func run() error {
 		}
 		return printManagerInvite(directory, *invite)
 	}
-	endpoints, err := managerEndpoints(managerEndpoint{listen: *listen, cert: *cert, key: *key}, *publicDomain, *publicCert, *publicKey)
+	endpoints, err := managerEndpoints(managerEndpoint{listen: *listen, cert: *cert, key: *key, lanHostname: *lanHostname}, *publicDomain, *publicCert, *publicKey)
 	if err != nil {
 		return err
 	}

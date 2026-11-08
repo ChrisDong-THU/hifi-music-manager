@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -17,6 +18,14 @@ def interface(name, ip, index=2, up=True):
 
 
 class LaunchTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.runtime = pathlib.Path(directory.name)
+        runtime_patch = patch.object(launcher, 'runtime_dir', return_value=self.runtime)
+        runtime_patch.start()
+        self.addCleanup(runtime_patch.stop)
+
     def test_reassigned_ip_and_default_route_win_without_widening_the_network(self):
         addresses = [interface('docker0', '172.17.0.1', 1), interface('wlan0', '192.168.1.2', 4),
                      interface('eth0', '192.168.1.5', 3), interface('down', '192.168.1.6', 5, False)]
@@ -28,6 +37,13 @@ class LaunchTests(unittest.TestCase):
         for network in ('0.0.0.0/0', '192.168.0.0/15', 'fc00::/7'):
             with self.assertRaises(ValueError):
                 launcher.trusted_network(network)
+
+    def test_single_lan_interface_does_not_query_routes(self):
+        wired = interface('eth0', '192.168.1.5')
+        wired['addr_info'].append(dict(local='192.168.1.2', scope='global', preferred_life_time=0))
+        with patch.object(launcher.subprocess, 'check_output', return_value=json.dumps([wired]).encode()) as run:
+            self.assertEqual(launcher.current_address(launcher.trusted_network('192.168.1.0/24')), '192.168.1.5')
+        run.assert_called_once_with(['ip', '-j', '-4', 'address', 'show'], timeout=5)
 
     def test_music_and_manager_use_the_current_ip_and_keep_identity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -47,6 +63,8 @@ class LaunchTests(unittest.TestCase):
                 self.assertEqual(args[args.index('-listen') + 1], '192.168.1.5:8787')
                 self.assertEqual(args[args.index('-allow-lan') + 1], '192.168.1.0/24')
                 self.assertNotIn('-public-domain', args)
+                launcher.start('manager', root, 8787, lan_hostname='nano.local')
+                self.assertEqual(execute.call_args[0][1][-2:], ['-lan-hostname', 'nano.local'])
                 launcher.start('manager', root, 8787, public_domain='manage.example.net')
                 args = execute.call_args[0][1]
                 self.assertEqual(args[-6:], ['-public-domain', 'manage.example.net',
@@ -59,7 +77,34 @@ class LaunchTests(unittest.TestCase):
                 launcher.start('bubble-relay', root, 8787, public_domain='music.example.net')
                 args = execute.call_args[0][1]
                 self.assertEqual(args[-4:], ['-bubble-relay-domain', 'music.example.net', '-bubble-relay-upstream', '192.168.1.5'])
+                binding = json.loads((self.runtime / 'hifi-lan' / 'bubble-relay').read_text())
+                self.assertEqual(binding, {'address': '192.168.1.5', 'pid': launcher.os.getpid()})
             self.assertEqual([p.name for p in path.parent.iterdir()], ['config.json'])
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Rebinding uses the Linux deployment lock')
+    def test_reconcile_restarts_only_current_processes_with_stale_addresses(self):
+        root = self.runtime / 'project'
+        path = root / 'music-service/config.json'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'lan_cidr': '192.168.1.0/24'}))
+        launcher.record_binding('music', '192.168.1.5')
+        launcher.record_binding('bubble', '192.168.1.5')
+        launcher.record_binding('manager', '192.168.1.2')
+        launcher.record_binding('bubble-relay', '192.168.1.5')
+        pid = launcher.os.getpid()
+        unchanged = b'MainPID=0\nId=hifi-manager.service\n'
+        changed = ('MainPID={}\nId=hifi-music.service\n\nMainPID=0\nId=hifi-bubbleupnp.service\n\n'
+                   'MainPID={}\nId=hifi-bubble-relay.service\n').format(pid, pid).encode()
+        with patch.object(launcher, 'current_address', side_effect=[None, '192.168.1.5', '192.168.1.2']), \
+             patch.object(launcher.subprocess, 'check_output', side_effect=[unchanged, changed]) as status, \
+             patch.object(launcher.subprocess, 'run') as run:
+            launcher.reconcile(root)
+            launcher.reconcile(root)
+            run.assert_not_called()
+            launcher.reconcile(root)
+        run.assert_called_once_with(['systemctl', '--user', 'try-restart', 'hifi-music.service',
+                                     'hifi-bubble-relay.service'], check=True)
+        self.assertEqual(status.call_count, 2)
 
     def test_delayed_network_is_retried_and_missing_network_times_out(self):
         with tempfile.TemporaryDirectory() as directory:
