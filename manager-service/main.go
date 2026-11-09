@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -28,7 +29,7 @@ func main() {
 func run() error {
 	home := flag.String("home", "../downloads/manager-local", "database and service directory")
 	libraryHome := flag.String("library-home", "", "project root: select all storage from the current USB library")
-	dataDisks := flag.Bool("data-disks", false, "manage mounted USB data disks without a playback supervisor")
+	dataDisks := flag.Bool("data-disks", false, "manage mounted USB data disks")
 	listen := flag.String("listen", "127.0.0.1:8787", "explicit listening IP and port")
 	lan := flag.String("allow-lan", "", "optional private LAN CIDR")
 	cert := flag.String("tls-cert", "", "PEM certificate for HTTPS management")
@@ -40,7 +41,7 @@ func run() error {
 	music := flag.String("music", "", "optional external music directory")
 	data := flag.String("data", "", "optional upload directory")
 	volume := flag.String("volume", "", "Linux mount point required for external USB storage")
-	rescanURL := flag.String("rescan-url", "", "optional loopback MinimServer rescan URL")
+	publicDAV := flag.Bool("public-webdav", false, "enable authenticated read-only WebDAV on the public HTTPS endpoint")
 	invite := flag.String("invite", "", "issue a one-time registration invitation for this username")
 	flag.Parse()
 	if *invite != "" {
@@ -53,6 +54,12 @@ func run() error {
 	endpoints, err := managerEndpoints(managerEndpoint{listen: *listen, cert: *cert, key: *key, lanHostname: *lanHostname}, *publicDomain, *publicCert, *publicKey)
 	if err != nil {
 		return err
+	}
+	if *publicDAV && *publicDomain == "" {
+		return fmt.Errorf("public-webdav 需要配置公网 HTTPS 入口")
+	}
+	for i := range endpoints {
+		endpoints[i].webdav = endpoints[i].publicDomain == "" || *publicDAV
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -68,7 +75,7 @@ func run() error {
 		if *dataDisks {
 			return fmt.Errorf("library-home 和 data-disks 不能同时使用")
 		}
-		return runDiskManager(ctx, project, allowed, *rescanURL, false, endpoints)
+		return runDiskManager(ctx, project, allowed, endpoints)
 	}
 	abs, err := filepath.Abs(*home)
 	if err != nil {
@@ -78,7 +85,7 @@ func run() error {
 		if *music != "" || *data != "" || *volume != "" {
 			return fmt.Errorf("数据盘管理模式不能指定独立的 music、data 或 volume")
 		}
-		return runDiskManager(ctx, abs, allowed, *rescanURL, true, endpoints)
+		return runDiskManager(ctx, abs, allowed, endpoints)
 	}
 	musicPath, dataPath := filepath.Join(abs, library.MusicDirectory), filepath.Join(abs, library.ManagerDirectory)
 	if *music != "" {
@@ -113,24 +120,21 @@ func run() error {
 			return err
 		}
 	}
-	var rescan func(context.Context) error
-	if *rescanURL != "" {
-		rescan, err = libraryRescan(*rescanURL)
-		if err != nil {
-			return err
-		}
-	}
 	auth, err := openManagerAuth(abs)
 	if err != nil {
 		return err
 	}
 	defer auth.db.Close()
+	dav, err := loadMusicDAV(abs)
+	if err != nil {
+		return err
+	}
 	a, err := newAppStorage(filepath.Join(abs, library.ManagerDirectory), musicPath, dataPath, guard)
 	if err != nil {
 		return err
 	}
 	defer func() { stop(); a.close() }()
-	a.lan, a.rescan = allowed, rescan
+	a.lan = allowed
 	storageLost := make(chan error, 1)
 	if guard != nil {
 		go func() {
@@ -151,7 +155,15 @@ func run() error {
 		}()
 	}
 	a.start(ctx)
-	err = serveManager(ctx, endpoints, a, a.trackRequests(a.routes(staticSite())), auth, a.health)
+	routes := a.routes(staticSite())
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isDAVPath(r.URL.Path) {
+			a.serveDAV(w, r)
+			return
+		}
+		routes.ServeHTTP(w, r)
+	})
+	err = serveManager(ctx, endpoints, a, a.trackRequests(handler), auth, a.health, dav)
 	if err == nil {
 		select {
 		case err := <-storageLost:

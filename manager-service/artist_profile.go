@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -75,11 +74,6 @@ func (a *app) saveArtistProfile(name, biography string, picture *albumCover) (Ar
 	op.Affected = 1
 	if err := a.finish(&op); err != nil {
 		return ArtistProfile{}, err
-	}
-	if err == nil && a.rescan != nil {
-		if syncErr := a.markPlaybackDirty(); syncErr != nil {
-			log.Printf("Playback notification pending: %v", syncErr)
-		}
 	}
 	return ArtistProfile(shared), err
 }

@@ -55,10 +55,10 @@ def cached_bundle_valid(bundle_path, architecture):
     try:
         with zipfile.ZipFile(str(bundle_path)) as bundle:
             manifest = json.loads(bundle.read('manifest.json').decode())
-            names = {'hifi-manager', 'hifi-music-service'}
+            names = {'hifi-manager'}
             return (manifest['architecture'] == architecture and
                     set(manifest['files']) == names and
-                    len(bundle.namelist()) == 3 and
+                    len(bundle.namelist()) == len(names) + 1 and
                     set(bundle.namelist()) == names | {'manifest.json'} and all(
                 hashlib.sha256(bundle.read(name)).hexdigest() == expected
                 for name, expected in manifest['files'].items()))
@@ -86,7 +86,7 @@ def build(architecture):
         raise RuntimeError('Install Node.js on the build computer')
     toolchain += subprocess.check_output([node, '--version']).decode()
     toolchain += sys.version
-    fingerprint = source_hash([PROJECT / 'music-service', PROJECT / 'manager-service', PROJECT / 'shared-library', PROJECT / 'scripts', PROJECT / 'deployment'], toolchain)
+    fingerprint = source_hash([PROJECT / 'manager-service', PROJECT / 'shared-library', PROJECT / 'scripts', PROJECT / 'deployment'], toolchain)
     output = OUTPUT / architecture / fingerprint
     bundle_path = output / 'bundle.zip'
     if cached_bundle_valid(bundle_path, architecture):
@@ -102,7 +102,7 @@ def build(architecture):
     files = {}
     run([compiler, 'vet', './...'], cwd=str(PROJECT / 'shared-library'), env=environment)
     run([compiler, 'test', '-count=1', '-timeout=90s', './...'], cwd=str(PROJECT / 'shared-library'), env=environment)
-    for source, name in [('music-service', 'hifi-music-service'), ('manager-service', 'hifi-manager')]:
+    for source, name in [('manager-service', 'hifi-manager')]:
         directory = PROJECT / source
         run([compiler, 'vet', './...'], cwd=str(directory), env=environment)
         run([compiler, 'test', '-count=1', '-timeout=90s', './...'], cwd=str(directory), env=environment)
@@ -137,7 +137,6 @@ def main():
     mode.add_argument('--check', action='store_true', help='read-only target preflight; no build or upload')
     mode.add_argument('--apply', action='store_true', help='build, install, start and verify; preserve all data')
     mode.add_argument('--reinstall', action='store_true', help='stop and replace the managed deployment; preserve all data')
-    mode.add_argument('--prepare-minim', action='store_true', help='first install: register the initialized MinimServer as a user service')
     mode.add_argument('--build', choices=('arm64', 'amd64'), help='build a reusable offline bundle only')
     args = parser.parse_args()
     started = time.monotonic()
@@ -149,23 +148,18 @@ def main():
     device = load_device(args.device)
     profile = json.dumps(device['profile'], separators=(',', ':'))
     script = installer_script()
-    if args.prepare_minim:
-        print(remote(device['ssh'], ['python3', '-', '--profile-json', profile, '--prepare-minim'], script))
-        return
     checked = json.loads(remote(device['ssh'], ['python3', '-', '--profile-json', profile, '--check'], script))
     if args.check:
         print(json.dumps(checked, ensure_ascii=False, indent=2))
         return
     bundle = build(checked['architecture'])
-    # Keep a newly discovered backend URL stable if the vendor daemon is stopped
-    # while its systemd service takes over during this installation.
-    profile = json.dumps(checked['profile'], separators=(',', ':'))
+    expected = ['--expect-volume', checked['volume_id']] if checked.get('volume_id') else []
     with zipfile.ZipFile(str(bundle)) as archive:
         manifest = json.loads(archive.read('manifest.json').decode())
     if not args.reinstall and checked['binary_sha256'] == manifest['files']:
         print('Executables unchanged; skipping file transfer.', file=sys.stderr)
         result = json.loads(remote(device['ssh'], ['python3', '-', '--profile-json', profile,
-                    '--reuse-manifest', json.dumps(manifest), '--apply'], script))
+                    '--reuse-manifest', json.dumps(manifest), '--apply'] + expected, script))
         result['elapsed_seconds'] = round(time.monotonic() - started, 2)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
@@ -177,7 +171,7 @@ def main():
         raise RuntimeError('Unexpected remote staging directory')
     try:
         run(['scp'] + SSH_OPTIONS + [bundle, device['ssh'] + ':' + staging + '/bundle.zip'])
-        command = ['python3', '-', '--profile-json', profile, '--bundle', staging + '/bundle.zip', '--apply']
+        command = ['python3', '-', '--profile-json', profile, '--bundle', staging + '/bundle.zip', '--apply'] + expected
         if args.reinstall:
             command.append('--reinstall')
         result = json.loads(remote(device['ssh'], command, script))

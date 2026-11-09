@@ -1,6 +1,5 @@
 const operations: Record<string, string> = {
   scan: "扫描曲库",
-  sync: "同步曲库",
   import: "导入音乐",
   edit: "保存标签",
   delete: "删除音乐",

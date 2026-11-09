@@ -60,6 +60,10 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 func (a *app) protectManager(next http.Handler, auth *managerAuth, health func() managerHealth, publicDomain, lanHostname string) http.Handler {
+	return a.protectManagerDAV(next, auth, health, publicDomain, lanHostname, nil)
+}
+
+func (a *app) protectManagerDAV(next http.Handler, auth *managerAuth, health func() managerHealth, publicDomain, lanHostname string, dav *musicDAV) http.Handler {
 	public := publicDomain != ""
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -98,7 +102,8 @@ func (a *app) protectManager(next http.Handler, auth *managerAuth, health func()
 			problem(w, http.StatusForbidden, errors.New("局域网管理需要使用 HTTPS"))
 			return
 		}
-		if r.Method != "GET" && r.Method != "HEAD" {
+		davRequest := isDAVPath(r.URL.Path)
+		if davRequest || r.Method != "GET" && r.Method != "HEAD" {
 			if origin := r.Header.Get("Origin"); origin != "" {
 				u, e := url.Parse(origin)
 				if e != nil || u.Scheme != scheme ||
@@ -112,7 +117,24 @@ func (a *app) protectManager(next http.Handler, auth *managerAuth, health func()
 				return
 			}
 		}
+		if davRequest {
+			if dav == nil {
+				http.NotFound(w, r)
+			} else {
+				dav.serve(w, r, next)
+			}
+			return
+		}
 		if auth != nil && !auth.allow(w, r, "hifi_auth_"+strings.TrimPrefix(a.cookieName, "hifi_session_")) {
+			return
+		}
+		if auth != nil && r.URL.Path == davSettings && r.Method == http.MethodGet {
+			if dav == nil {
+				respond(w, map[string]bool{"enabled": false})
+			} else {
+				respond(w, map[string]any{"enabled": true, "url": scheme + "://" + r.Host + davPath + "/",
+					"username": davUser, "password": dav.password})
+			}
 			return
 		}
 		if r.Method != "GET" && r.Method != "HEAD" {

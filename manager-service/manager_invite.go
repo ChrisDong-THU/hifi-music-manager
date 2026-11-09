@@ -31,17 +31,31 @@ func readManagerInviteKey(config string) ([]byte, error) {
 // The server creates the key while holding the auth database lock. The local
 // issuer only reads it, so it can generate an invitation while the server runs.
 func loadManagerInviteKey(config string) ([]byte, error) {
-	filename := filepath.Join(config, managerInviteKeyFile)
-	key, err := readManagerInviteKey(config)
+	return loadServiceKey(config, managerInviteKeyFile)
+}
+
+func loadServiceKey(config, name string) ([]byte, error) {
+	filename := filepath.Join(config, name)
+	info, err := os.Lstat(filename)
 	if !errors.Is(err, os.ErrNotExist) {
 		if err != nil {
 			return nil, err
 		}
+		if !info.Mode().IsRegular() || info.Size() != sha256.Size {
+			return nil, fmt.Errorf("服务密钥无效：%s", name)
+		}
+		key, err := os.ReadFile(filename)
+		if err != nil {
+			return nil, err
+		}
+		if len(key) != sha256.Size {
+			return nil, fmt.Errorf("服务密钥无效：%s", name)
+		}
 		return key, restrictAuthFile(filename)
 	}
-	key = make([]byte, sha256.Size)
+	key := make([]byte, sha256.Size)
 	rand.Read(key)
-	f, err := os.CreateTemp(config, ".manager-invite-*")
+	f, err := os.CreateTemp(config, ".service-key-*")
 	if err != nil {
 		return nil, err
 	}

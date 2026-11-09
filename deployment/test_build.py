@@ -48,7 +48,7 @@ class BuildTests(unittest.TestCase):
             self.assertNotEqual(deployer.source_hash([self.root], 'old-node'), deployer.source_hash([self.root], 'new-node'))
 
     def write_bundle(self, changes=None, extra=None):
-        data = {'hifi-manager': b'manager', 'hifi-music-service': b'music'}
+        data = {'hifi-manager': b'manager'}
         hashes = {name: hashlib.sha256(value).hexdigest() for name, value in data.items()}
         data.update(changes or {})
         path = self.root / 'bundle.zip'

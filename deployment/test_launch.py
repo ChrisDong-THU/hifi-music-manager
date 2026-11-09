@@ -45,83 +45,66 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(launcher.current_address(launcher.trusted_network('192.168.1.0/24')), '192.168.1.5')
         run.assert_called_once_with(['ip', '-j', '-4', 'address', 'show'], timeout=5)
 
-    def test_music_and_manager_use_the_current_ip_and_keep_identity(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            path = root / 'music-service/config.json'
-            path.parent.mkdir()
-            config = dict(lan_cidr='192.168.1.0/24', browse_listen='192.168.1.2:9792',
-                          browse_udn='uuid:stable', backend_description='http://127.0.0.1:9791/stable', name='Music')
+    def test_manager_and_webdav_use_the_current_ip_and_preserve_tls_names(self):
+        root = self.runtime / 'project'
+        path = root / 'config/manager-network.json'
+        path.parent.mkdir(parents=True)
+        config = dict(lan_cidr='192.168.1.0/24', web_port=8787, manager_lan_hostname='nano.local')
+        with patch.object(launcher, 'current_address', return_value='192.168.1.5'), patch.object(launcher.os, 'execv') as execute:
             path.write_text(json.dumps(config))
-            with patch.object(launcher, 'current_address', return_value='192.168.1.5'), patch.object(launcher.os, 'execv') as execute:
-                launcher.start('music', root, 8787)
-                saved = json.loads(path.read_text())
-                self.assertEqual(saved, dict(config, browse_listen='192.168.1.5:9792'))
-                self.assertEqual(execute.call_args[0][1], [str(root / 'music-service/hifi-music-service'), '-home', str(root)])
-                launcher.start('manager', root, 8787)
-                args = execute.call_args[0][1]
-                self.assertEqual(args[args.index('-listen') + 1], '192.168.1.5:8787')
-                self.assertEqual(args[args.index('-allow-lan') + 1], '192.168.1.0/24')
-                self.assertNotIn('-public-domain', args)
-                launcher.start('manager', root, 8787, lan_hostname='nano.local')
-                self.assertEqual(execute.call_args[0][1][-2:], ['-lan-hostname', 'nano.local'])
-                launcher.start('manager', root, 8787, public_domain='manage.example.net')
-                args = execute.call_args[0][1]
-                self.assertEqual(args[-6:], ['-public-domain', 'manage.example.net',
-                    '-public-tls-cert', str(root / 'config/manager-public-tls-cert.pem'),
-                    '-public-tls-key', str(root / 'config/manager-public-tls-key.pem')])
-                launcher.start('bubble', root, 8787, public_domain='music.example.net')
-                args = execute.call_args[0][1]
-                self.assertEqual(args[:4], ['/usr/bin/authbind', '--deep', '/bin/sh', str(root / 'bubbleupnp/launch.sh')])
-                self.assertEqual(args[-6:], ['-lanIp', '192.168.1.5', '-httpPort', '80', '-wanHostname', 'music.example.net'])
-                launcher.start('bubble-relay', root, 8787, public_domain='music.example.net')
-                args = execute.call_args[0][1]
-                self.assertEqual(args[-4:], ['-bubble-relay-domain', 'music.example.net', '-bubble-relay-upstream', '192.168.1.5'])
-                binding = json.loads((self.runtime / 'hifi-lan' / 'bubble-relay').read_text())
-                self.assertEqual(binding, {'address': '192.168.1.5', 'pid': launcher.os.getpid()})
-            self.assertEqual([p.name for p in path.parent.iterdir()], ['config.json'])
+            launcher.start(root)
+            args = execute.call_args[0][1]
+            self.assertEqual(args[args.index('-listen') + 1], '192.168.1.5:8787')
+            self.assertEqual(args[args.index('-allow-lan') + 1], '192.168.1.0/24')
+            self.assertIn('nano.local', args)
+            self.assertNotIn('-public-webdav', args)
+            config.update(manager_public_domain='manage.example.net', webdav_public=True)
+            path.write_text(json.dumps(config))
+            launcher.start(root)
+            args = execute.call_args[0][1]
+            self.assertIn('manage.example.net', args)
+            self.assertIn('-public-webdav', args)
+            self.assertEqual(json.loads(path.read_text()), config)
+            binding = json.loads((self.runtime / 'hifi-lan/manager').read_text())
+            self.assertEqual(binding, {'address': '192.168.1.5', 'pid': launcher.os.getpid()})
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'Rebinding uses the Linux deployment lock')
     def test_reconcile_restarts_only_current_processes_with_stale_addresses(self):
         root = self.runtime / 'project'
-        path = root / 'music-service/config.json'
+        path = root / 'config/manager-network.json'
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'lan_cidr': '192.168.1.0/24'}))
-        launcher.record_binding('music', '192.168.1.5')
-        launcher.record_binding('bubble', '192.168.1.5')
+        launcher.record_binding('music', '192.168.1.2')  # Old records are ignored.
         launcher.record_binding('manager', '192.168.1.2')
-        launcher.record_binding('bubble-relay', '192.168.1.5')
         pid = launcher.os.getpid()
         unchanged = b'MainPID=0\nId=hifi-manager.service\n'
-        changed = ('MainPID={}\nId=hifi-music.service\n\nMainPID=0\nId=hifi-bubbleupnp.service\n\n'
-                   'MainPID={}\nId=hifi-bubble-relay.service\n').format(pid, pid).encode()
-        with patch.object(launcher, 'current_address', side_effect=[None, '192.168.1.5', '192.168.1.2']), \
+        changed = ('MainPID={}\nId=hifi-manager.service\n').format(pid).encode()
+        with patch.object(launcher, 'current_address', side_effect=[None, '192.168.1.5', '192.168.1.5']), \
              patch.object(launcher.subprocess, 'check_output', side_effect=[unchanged, changed]) as status, \
              patch.object(launcher.subprocess, 'run') as run:
             launcher.reconcile(root)
             launcher.reconcile(root)
             run.assert_not_called()
             launcher.reconcile(root)
-        run.assert_called_once_with(['systemctl', '--user', 'try-restart', 'hifi-music.service',
-                                     'hifi-bubble-relay.service'], check=True)
+        run.assert_called_once_with(['systemctl', '--user', 'try-restart', 'hifi-manager.service'], check=True)
         self.assertEqual(status.call_count, 2)
 
     def test_delayed_network_is_retried_and_missing_network_times_out(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            path = root / 'music-service/config.json'
+            path = root / 'config/manager-network.json'
             path.parent.mkdir()
-            original = json.dumps(dict(lan_cidr='192.168.1.0/24', browse_listen='192.168.1.2:9792'))
+            original = json.dumps(dict(lan_cidr='192.168.1.0/24', web_port=8787))
             path.write_text(original)
             with patch.object(launcher, 'current_address', side_effect=[None, '192.168.1.5']), \
                  patch.object(launcher.time, 'sleep') as sleep, patch.object(launcher.os, 'execv') as execute:
-                launcher.start('manager', root, 8787)
+                launcher.start(root)
                 sleep.assert_called_once_with(1)
                 self.assertTrue(execute.called)
             with patch.object(launcher, 'current_address', return_value=None), \
                  patch.object(launcher.time, 'monotonic', side_effect=[0, 121]), patch.object(launcher.os, 'execv') as execute:
                 with self.assertRaisesRegex(RuntimeError, 'No active LAN'):
-                    launcher.start('music', root, 8787)
+                    launcher.start(root)
                 execute.assert_not_called()
             self.assertEqual(path.read_text(), original)
 

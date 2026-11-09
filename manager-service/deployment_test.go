@@ -5,10 +5,10 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -160,20 +160,7 @@ func awaitTask(t *testing.T, a *app, id string) task {
 	return task{}
 }
 
-func awaitPlaybackSync(t *testing.T, a *app) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		state := a.playbackSyncState()
-		if state.Requested > 0 && state.Requested == state.Delivered {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("playback notification not delivered")
-}
-
-func TestExternalStorageAndPlaybackRescanFollowCommittedImport(t *testing.T) {
+func TestWebDAVSeesCommittedImportAndRejectsAnOfflineDisk(t *testing.T) {
 	home, volume := t.TempDir(), t.TempDir()
 	music, data := filepath.Join(volume, "music"), filepath.Join(volume, "manager")
 	var mounted atomic.Bool
@@ -205,26 +192,15 @@ func TestExternalStorageAndPlaybackRescanFollowCommittedImport(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(data, "uploads", batch.ID, "one.flac")); err != nil {
 		t.Fatal(err)
 	}
-	var calls atomic.Int32
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		if r.Method != "POST" || string(body) != "rescan" {
-			t.Error("invalid rescan request")
-		}
-		count := calls.Add(1)
-		tracks, err := a.readTracks()
-		if err != nil {
-			t.Error(err)
-		}
-		if count == 2 && len(tracks) != 1 {
-			t.Error("MinimServer notified before the import committed")
-		}
-		w.WriteHeader(200)
-	}))
-	defer backend.Close()
-	a.rescan, err = libraryRescan(backend.URL)
-	if err != nil {
-		t.Fatal(err)
+	dav := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest("PROPFIND", "/webdav/", nil)
+		r.Header.Set("Depth", "1")
+		w := httptest.NewRecorder()
+		a.trackRequests(http.HandlerFunc(a.serveDAV)).ServeHTTP(w, r)
+		return w
+	}
+	if before := dav(); before.Code != 207 || strings.Contains(before.Body.String(), ".flac") {
+		t.Fatalf("draft leaked into WebDAV: %d %s", before.Code, before.Body.String())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -238,7 +214,6 @@ func TestExternalStorageAndPlaybackRescanFollowCommittedImport(t *testing.T) {
 	if awaitTask(t, a, initial).State != "done" {
 		t.Fatal("startup scan failed")
 	}
-	awaitPlaybackSync(t, a)
 	id, err := a.submit("import", func() error { return a.importWithPolicy(batch.ID, "reject", []string{uploaded.ID}) })
 	if err != nil {
 		t.Fatal(err)
@@ -246,17 +221,16 @@ func TestExternalStorageAndPlaybackRescanFollowCommittedImport(t *testing.T) {
 	if job := awaitTask(t, a, id); job.State != "done" {
 		t.Fatal(job.Message)
 	}
-	awaitPlaybackSync(t, a)
-	if calls.Load() != 2 {
-		t.Fatal("import did not refresh the playback library")
+	tracks, err := a.readTracks()
+	if err != nil || len(tracks) != 1 {
+		t.Fatalf("track was not committed: %v %v", tracks, err)
 	}
-	id, err = a.submit("preview", func() error { return nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	awaitTask(t, a, id)
-	if calls.Load() != 2 {
-		t.Fatal("draft-only work triggered a playback rescan")
+	davFile := httptest.NewRequest("GET", (&url.URL{Path: "/webdav/" + tracks[0].Path}).EscapedPath(), nil)
+	ranged := httptest.NewRecorder()
+	davFile.Header.Set("Range", "bytes=0-3")
+	a.trackRequests(http.HandlerFunc(a.serveDAV)).ServeHTTP(ranged, davFile)
+	if ranged.Code != 206 || ranged.Body.String() != "fLaC" {
+		t.Fatalf("import is not immediately available in WebDAV: %d %q", ranged.Code, ranged.Body.String())
 	}
 	state := request(a, "GET", "/api/state", "", false)
 	if !strings.Contains(state.Body.String(), filepath.ToSlash(music)) && !strings.Contains(state.Body.String(), strings.ReplaceAll(music, `\`, `\\`)) {
@@ -274,24 +248,7 @@ func TestExternalStorageAndPlaybackRescanFollowCommittedImport(t *testing.T) {
 	if awaitTask(t, a, id).State != "failed" || wrote.Load() {
 		t.Fatal("queued work wrote after the USB went offline")
 	}
-	if calls.Load() != 2 {
-		t.Fatal("offline work triggered a rescan")
-	}
-}
-
-func TestRescanRejectsNonLoopbackAndRedirects(t *testing.T) {
-	for _, endpoint := range []string{"https://127.0.0.1/", "http://192.168.1.2/", "http://user:pass@127.0.0.1/", "http://127.0.0.1/#fragment", "not a URL"} {
-		if _, err := libraryRescan(endpoint); err == nil {
-			t.Fatalf("unsafe rescan address: %s", endpoint)
-		}
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "http://example.com", 302) }))
-	defer server.Close()
-	rescan, err := libraryRescan(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = rescan(context.Background()); err == nil {
-		t.Fatal("redirect accepted")
+	if offline := dav(); offline.Code != 503 {
+		t.Fatalf("offline disk served WebDAV: %d", offline.Code)
 	}
 }

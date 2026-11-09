@@ -1,6 +1,6 @@
 # HiFi Music Manager
 
-面向本机和局域网的音乐库管理工具。上传音乐、整理标签与封面、检测音源，并通过独立的 MinimServer 适配服务提供 UPnP 浏览和播放资源。
+面向本机和局域网的音乐库管理工具。上传音乐、整理标签与封面、检测音源，并通过只读 WebDAV 提供正式曲库的目录浏览和原文件播放。
 
 Go 服务内嵌 React 界面、字体和许可证，运行时无需 Node.js 或数据库服务器。
 
@@ -11,7 +11,7 @@ Go 服务内嵌 React 界面、字体和许可证，运行时无需 Node.js 或�
 - FLAC、MP3 标签与封面写入；其他支持格式可原样导入。
 - FLAC、WAV、AIFF 整数 PCM 位深和频谱分析，结果用于提示，不证明母带来源。
 - 专辑、歌手、曲目搜索，浏览器试听，歌手头像与简介管理。
-- USB 数据盘选择、按盘索引、挂载校验和独立的播放索引同步。
+- USB 数据盘选择、按盘索引、挂载校验。导入、编辑和删除提交后会直接反映到 WebDAV。
 
 删除为永久删除，批量操作按歌曲逐项提交。活动草稿不按年龄清理。详见[存储与操作](docs/STORAGE.md)。
 
@@ -33,6 +33,8 @@ powershell -File scripts/update-manager-local.ps1
 
 从登录页点击「注册」，输入邀请码、签发时指定的账号和自设密码。邀请码 30 分钟内有效，只能使用一次。登录后可在首页选择系统已挂载的 USB 数据盘。初始化需要明确确认，不格式化磁盘，也不清理盘内其他目录。
 
+在首页点击「WebDAV 连接」，把显示的地址、用户名和访问密码填入支持 WebDAV 的播放器。浏览器仍可在曲库页面直接试听。
+
 仅构建、不启动服务：
 
 ```powershell
@@ -43,7 +45,7 @@ Linux 或其他开发环境的直接启动方式见[开发指南](docs/DEVELOPME
 
 ## 设备部署
 
-目标支持 Linux ARM64 和 x86_64。音乐服务需要已安装并初始化的 MinimServer、Java 17、systemd 用户服务及可写 USB 音乐盘。
+目标支持 Linux ARM64 和 x86_64，使用 systemd 用户服务和系统挂载的可写 USB 音乐盘。
 
 ```console
 python deployment/deploy.py --build arm64
@@ -53,17 +55,16 @@ python deployment/deploy.py --device config/devices/local.json --apply
 
 将 [example.json](config/devices/example.json) 复制为本机的 `local.json` 并填写设备配置。完整步骤见[部署指南](deployment/README.md)。构建不会连接设备；更新保留既有数据、配置和身份。
 
-Nano 可通过 ChmlFrp 提供公网管理 Web、浏览器试听和 BubbleUPnP 远程播放。见[公网部署与验收](deployment/CHMLFRP.md)。
+Nano 可通过同一条 ChmlFrp HTTPS 隧道提供公网管理 Web 和 WebDAV。见[公网部署与验收](deployment/CHMLFRP.md)。
 
 ## 项目结构
 
 | 路径 | 职责 |
 | --- | --- |
-| `manager-service/` | Go 管理 API、React/MUI 前端、音源分析 |
-| `music-service/` | 数据盘监督、MinimServer 运行适配、UPnP 展示 |
-| `shared-library/` | 共享资源格式、盘状态和安全文件访问 |
+| `manager-service/` | Go 管理 API、React/MUI 前端、WebDAV 和音源分析 |
+| `shared-library/` | 资源格式、盘身份和安全文件访问 |
 | `deployment/` | 离线构建、预检、安装与失败回退 |
-| `scripts/` | 本机启动与更新、设备维护及只读验收 |
+| `scripts/` | 本机启动、构建与更新 |
 | `docs/` | 开发、接口与数据规则 |
 | `config/devices/` | 通用配置示例；个人设备配置不入库 |
 

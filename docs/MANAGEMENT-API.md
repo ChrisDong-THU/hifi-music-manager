@@ -10,13 +10,13 @@ API 与内嵌前端共同构建。接口返回 JSON，错误为 `{error}`；后�
 
 管理 API、封面和音频要求有效的登录 Cookie。登录后 `GET /api/state` 返回 CSRF Cookie、令牌和 `library_session`。修改请求携带 Cookie、`X-CSRF-Token` 与 `X-Library-Session`，查询也绑定当前盘上下文。原生音频和封面请求使用 `library_session` 查询参数。
 
-换盘或重挂会更换曲库会话，服务重启会清除登录会话。`GET /healthz` 无需登录，只提供服务名、任务是否繁忙和存储是否就绪，用于启动与安全更新检查。
+换盘或重挂会更换曲库会话，服务重启会清除登录会话。`GET /healthz` 仅在本机和局域网入口可用，无需登录，提供服务名、任务是否繁忙、存储是否就绪和当前数据盘标识，用于启动与安全更新检查。
 
 ## 控制与草稿
 
 | 方法与路径 | 正文或返回 |
 | --- | --- |
-| `GET /api/state` | 存储、统计、运行任务、有限操作摘要、播放同步 |
+| `GET /api/state` | 存储、统计、运行任务、有限操作摘要 |
 | `GET /api/system/disks` | 可选择的数据盘 |
 | `POST /api/system/disks` | 选盘及显式初始化确认 |
 | `GET /api/drafts` | `{drafts, revision}`；摘要不含歌词 |
@@ -42,3 +42,4 @@ API 与内嵌前端共同构建。接口返回 JSON，错误为 `{error}`；后�
 曲目修改与删除使用 `POST /api/tracks/edit`、`/api/tracks/delete`；专辑使用 `/api/albums/detail`、`/api/albums/edit`、`/api/albums/delete`；歌手资料使用 `/api/artists/detail`、`/api/artists/edit`。
 
 音频支持 HTTP Range。修改是直接提交，部分成功与清理规则见[存储与操作](STORAGE.md)。
+WebDAV 连接信息由 `GET /api/system/webdav` 提供，需要管理会话，不要求有活动盘。启用时返回 `enabled`、`url`、`username`、`password`，禁用时仅返回 `{"enabled":false}`。该响应不得缓存。播放器使用返回的独立凭据连接 `/webdav/`。

@@ -6,14 +6,12 @@ import os
 import pathlib
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 
 
 PRIVATE = tuple(ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
-LAN_SERVICES = {'music': 'hifi-music.service', 'manager': 'hifi-manager.service',
-                'bubble': 'hifi-bubbleupnp.service', 'bubble-relay': 'hifi-bubble-relay.service'}
+LAN_SERVICES = {'manager': 'hifi-manager.service'}
 
 
 def trusted_network(value):
@@ -56,7 +54,7 @@ def current_address(network):
 
 def publish(path, config):
     if path.is_symlink():
-        raise ValueError('Music configuration cannot be a symlink')
+        raise ValueError('LAN binding record cannot be a symlink')
     fd, pending = tempfile.mkstemp(prefix='.network-', dir=str(path.parent))
     try:
         with os.fdopen(fd, 'wb') as stream:
@@ -90,7 +88,7 @@ def reconcile(home):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
-        config = json.loads((pathlib.Path(home) / 'music-service/config.json').read_text())
+        config = json.loads((pathlib.Path(home) / 'config/manager-network.json').read_text())
         address = current_address(trusted_network(config['lan_cidr']))
         if not address:
             return
@@ -131,15 +129,13 @@ def watch(home):
                 pass  # Retry after an installer transaction or a missed event.
 
 
-def start(service, home, web_port, timeout=120, public_domain='', lan_hostname=''):
-    if (service not in LAN_SERVICES or not 1024 <= int(web_port) <= 65535 or
-            public_domain and service == 'music' or not public_domain and service == 'bubble-relay' or
-            lan_hostname and service != 'manager'):
-        raise ValueError('Invalid service or Web port')
+def start(home, timeout=120):
     root = pathlib.Path(home)
-    path = root / 'music-service/config.json'
-    config = json.loads(path.read_text())
+    config = json.loads((root / 'config/manager-network.json').read_text())
     network = trusted_network(config['lan_cidr'])
+    web_port = config['web_port']
+    if type(web_port) is not int or not 1024 <= web_port <= 65535:
+        raise ValueError('Invalid Web port')
     deadline = time.monotonic() + timeout
     print('Waiting for a LAN address inside ' + str(network), flush=True)
     while True:
@@ -152,52 +148,29 @@ def start(service, home, web_port, timeout=120, public_domain='', lan_hostname='
         if time.monotonic() >= deadline:
             raise RuntimeError('No active LAN address inside ' + str(network))
         time.sleep(1)
-    if service == 'music':
-        _, port = config['browse_listen'].rsplit(':', 1)
-        if not 1024 <= int(port) <= 65535:
-            raise ValueError('Invalid browse port')
-        listen = address + ':' + port
-        if listen != config['browse_listen']:
-            config['browse_listen'] = listen
-            publish(path, config)
-        executable = str(root / 'music-service/hifi-music-service')
-        args = [executable, '-home', str(root)]
-    elif service == 'manager':
-        executable = str(root / 'manager-service/hifi-manager')
-        args = [executable, '-library-home', str(root), '-listen', address + ':' + str(web_port),
-                '-allow-lan', str(network), '-rescan-url', 'http://127.0.0.1:9790/']
-        stem = 'manager-lan-tls' if lan_hostname else 'manager-tls'
-        cert, key = (root / 'config' / (stem + suffix) for suffix in ('-cert.pem', '-key.pem'))
-        if cert.exists() or key.exists():
-            args += ['-tls-cert', str(cert), '-tls-key', str(key)]
-        if lan_hostname:
-            args += ['-lan-hostname', lan_hostname]
-        if public_domain:
-            cert, key = (root / 'config' / name for name in ('manager-public-tls-cert.pem', 'manager-public-tls-key.pem'))
-            args += ['-public-domain', public_domain, '-public-tls-cert', str(cert), '-public-tls-key', str(key)]
-    elif service == 'bubble':
-        args = ['/bin/sh', str(root / 'bubbleupnp/launch.sh'), '-disableUPnPPortForwarding',
-                '-disableCloudFfprobe', '-lanIp', address]
-        if public_domain:
-            args = ['/usr/bin/authbind', '--deep'] + args + ['-httpPort', '80', '-wanHostname', public_domain]
-        executable = args[0]
-    else:
-        executable = str(root / 'music-service/hifi-music-service')
-        args = [executable, '-home', str(root), '-bubble-relay-domain', public_domain, '-bubble-relay-upstream', address]
-    print('Starting ' + service + ' on ' + address, flush=True)
-    record_binding(service, address)
+    executable = str(root / 'manager-service/hifi-manager')
+    args = [executable, '-library-home', str(root), '-listen', address + ':' + str(web_port),
+            '-allow-lan', str(network)]
+    lan_hostname = config.get('manager_lan_hostname')
+    stem = 'manager-lan-tls' if lan_hostname else 'manager-tls'
+    cert, key = (root / 'config' / (stem + suffix) for suffix in ('-cert.pem', '-key.pem'))
+    args += ['-tls-cert', str(cert), '-tls-key', str(key)]
+    if lan_hostname:
+        args += ['-lan-hostname', lan_hostname]
+    if config.get('manager_public_domain'):
+        cert, key = (root / 'config' / ('manager-public-tls-' + n + '.pem') for n in ('cert', 'key'))
+        args += ['-public-domain', config['manager_public_domain'],
+                 '-public-tls-cert', str(cert), '-public-tls-key', str(key)]
+    if config.get('webdav_public'):
+        args.append('-public-webdav')
+    print('Starting management and WebDAV on ' + address, flush=True)
+    record_binding('manager', address)
     os.execv(executable, args)
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 3 and sys.argv[1] == 'watch':
-        watch(sys.argv[2])
-    else:
-        parser = argparse.ArgumentParser()
-        parser.add_argument('service', choices=LAN_SERVICES)
-        parser.add_argument('home')
-        parser.add_argument('web_port', type=int)
-        parser.add_argument('public_domain', nargs='?', default='')
-        parser.add_argument('--lan-hostname', default='')
-        args = parser.parse_args()
-        start(args.service, args.home, args.web_port, public_domain=args.public_domain, lan_hostname=args.lan_hostname)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('action', choices=('manager', 'watch'))
+    parser.add_argument('home')
+    args = parser.parse_args()
+    (start if args.action == 'manager' else watch)(args.home)

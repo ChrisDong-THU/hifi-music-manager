@@ -26,7 +26,6 @@ type serviceState struct {
 	Stats            libraryStats `json:"stats"`
 	Operations       []Operation  `json:"operations"`
 	Jobs             []task       `json:"jobs"`
-	PlaybackSync     playbackSync `json:"playback_sync"`
 	Storage          *storageInfo `json:"storage"`
 }
 
@@ -80,6 +79,6 @@ func (a *app) state(w http.ResponseWriter, r *http.Request) {
 		CSRF: a.csrf, Mode: mode, Revision: revision, LibrarySession: a.librarySession,
 		ResourceRevision: resourceRevision, CoverRevision: coverRevision, ActiveMutations: mutations,
 		MusicPath: a.music.Name(), UploadsPath: filepath.Join(a.data.Name(), "uploads"),
-		Stats: index.stats, Operations: ops, Jobs: jobs, PlaybackSync: a.playbackSyncState(), Storage: a.storage,
+		Stats: index.stats, Operations: ops, Jobs: jobs, Storage: a.storage,
 	})
 }

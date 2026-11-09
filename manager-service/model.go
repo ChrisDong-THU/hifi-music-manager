@@ -155,8 +155,6 @@ type app struct {
 	cookieName      string
 	lan             netip.Prefix
 	storageGuard    func() error
-	rescan          func(context.Context) error
-	syncWake        chan struct{}
 	storage         *storageInfo
 	storageMountID  string
 	externalTasks   func() []task
@@ -237,7 +235,7 @@ func newAppStorage(home, musicPath, dataPath string, guard func() error) (*app, 
 	key := sha256.Sum256([]byte(home))
 	a.cookieName = "hifi_session_" + hex.EncodeToString(key[:6])
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range []string{"tracks", "batches", "operations", "playback_sync"} {
+		for _, b := range []string{"tracks", "batches", "operations"} {
 			if _, e := tx.CreateBucketIfNotExists([]byte(b)); e != nil {
 				return e
 			}

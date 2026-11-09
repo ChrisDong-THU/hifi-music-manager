@@ -4,7 +4,7 @@
 
 | 工具 | 要求 |
 | --- | --- |
-| Go | 1.25 或更高，三个模块均有独立 `go.mod` |
+| Go | 1.25 或更高，两个模块均有独立 `go.mod` |
 | Node.js | 22.17 或更高，前端使用锁定的 npm 依赖 |
 | Python | 3.8 或更高，用于部署工具和脚本测试 |
 | OpenSSH | 仅设备预检、安装及验收需要 |
@@ -39,7 +39,7 @@ python -B -m unittest discover -s deployment -p "test_*.py"
 python -B -m unittest discover -s scripts/tests -p "test_*.py"
 ```
 
-分别在 `shared-library/`、`manager-service/`、`music-service/` 执行：
+分别在 `shared-library/`、`manager-service/` 执行：
 
 ```console
 go vet ./...
