@@ -12,7 +12,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-var discFolder = regexp.MustCompile(`(?i)^(cd|disc|disk)[ _.-]*[0-9]+$`)
+var discFolder = regexp.MustCompile(`(?i)^(?:cd|disc|disk)[ _.-]*([0-9]+)$`)
 
 // Album tasks refer to the existing inbox files. Grouping never moves or
 // renames files, databases, library roots, or existing batch identifiers.
@@ -29,7 +29,7 @@ func (a *app) splitAlbums(id string) ([]string, error) {
 	if len(b.Children) > 0 {
 		return b.Children, nil
 	}
-	if err := a.checkDraftWritable(id); err != nil {
+	if err := a.checkDraftWritable(b); err != nil {
 		return nil, err
 	}
 	root, err := draftFileRoot(b)
@@ -41,13 +41,9 @@ func (a *app) splitAlbums(id string) ([]string, error) {
 	}
 	groups := map[string][]Track{}
 	for _, f := range b.Files {
-		dir := filepath.Dir(f.Path)
-		if discFolder.MatchString(filepath.Base(dir)) {
-			dir = filepath.Dir(dir)
-		}
-		key := "folder:" + filepath.ToSlash(dir)
+		key := "folder:" + albumLocation(f.Path, f.Tags)
 		if f.Tags.Album != "" {
-			key += "\x00album:" + albumKey(f)
+			key += "\x00album:" + albumIdentity(f.Tags.Album, albumCredit(f.Tags))
 		}
 		groups[key] = append(groups[key], f)
 	}
@@ -64,11 +60,7 @@ func (a *app) splitAlbums(id string) ([]string, error) {
 		files := groups[key]
 		name := files[0].Tags.Album
 		if name != "" {
-			artist := files[0].Tags.AlbumArtist
-			if artist == "" {
-				artist = files[0].Tags.Artist
-			}
-			if artist != "" {
+			if artist := albumCredit(files[0].Tags); artist != "" {
 				name = artist + " — " + name
 			}
 		} else {
@@ -91,19 +83,11 @@ func (a *app) splitAlbums(id string) ([]string, error) {
 	err = a.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte("batches"))
 		for _, child := range children {
-			raw, e := marshal(child)
-			if e != nil {
-				return e
-			}
-			if e = bucket.Put([]byte(child.ID), raw); e != nil {
+			if e := putRecord(bucket, child.ID, child); e != nil {
 				return e
 			}
 		}
-		raw, e := marshal(b)
-		if e != nil {
-			return e
-		}
-		return bucket.Put([]byte(b.ID), raw)
+		return putRecord(bucket, b.ID, b)
 	})
 	return b.Children, err
 }

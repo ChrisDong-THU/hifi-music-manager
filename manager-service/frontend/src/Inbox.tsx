@@ -42,7 +42,7 @@ import {
 import { AccentHeader } from "./upstream/primitives";
 import { UploadArea, type useUpload } from "./upload";
 import { hasUploadFiles, isTextEditing } from "./upload-files";
-import type { Playback, Draft } from "./types";
+import type { Playback, Draft, Preferences } from "./types";
 import { ScrollableCardContent } from "./ScrollableCardContent";
 import { hasActiveFileJobs } from "./jobs";
 import { AudioQuality } from "./AudioQuality";
@@ -57,6 +57,17 @@ import {
 } from "./draft-selection";
 
 const noDrafts: Draft[] = [];
+type DuplicatePolicy = Preferences["duplicate_policy"];
+type DraftCommand = {
+  kind: "import" | "delete";
+  selection: ReturnType<typeof draftSelection>;
+  duplicatePolicy: DuplicatePolicy;
+};
+const duplicatePolicyDescription: Record<DuplicatePolicy, string> = {
+  skip: "未指定专辑位置时，其他专辑里的相同录音也会跳过。若已指定目标专辑或独立版本，想从其他专辑保留相同录音时，请选择「保留副本」。",
+  keep: "即使曲库已有相同的文件或录音，也会把所选曲目导入目标专辑。",
+  reject: "若所选曲目与曲库或同一草稿中所选的其他曲目重复，该草稿会停止导入。",
+};
 
 export function InboxPage({
   onPlay,
@@ -84,6 +95,7 @@ export function InboxPage({
     [settings, setSettings] = useState(false),
     [submitting, setSubmitting] = useState(false),
     [drag, setDrag] = useState(false);
+  const [command, setCommand] = useState<DraftCommand | null>(null);
   useEffect(() => {
     setSelected((old) => pruneDraftSelection(batches, old));
   }, [batches]);
@@ -108,6 +120,10 @@ export function InboxPage({
     (sum, entry) => sum + entry.files.length,
     0,
   );
+  const pendingCount = command?.selection.reduce(
+    (sum, entry) => sum + entry.files.length,
+    0,
+  );
   const totalCount = batches.reduce(
     (sum, batch) => sum + batch.files.length,
     0,
@@ -125,27 +141,31 @@ export function InboxPage({
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
-  async function processSelected(kind: "import" | "delete") {
+  function captureSelection(kind: DraftCommand["kind"]) {
+    setCommand({ kind, selection: chosen, duplicatePolicy: preferences.duplicate_policy });
+  }
+  async function processSelected(kind: DraftCommand["kind"]) {
+    if (!command || command.kind !== kind) return;
     setSubmitting(true);
     try {
-      for (const { batch, files } of chosen) {
+      for (const [index, { batch, files }] of command.selection.entries()) {
         await enqueue(
           `drafts/${batch.id}/${kind}`,
           {
             ids: files.map((file) => file.id),
             ...(kind === "import"
               ? {
-                  duplicate_policy: preferences.duplicate_policy,
+                  duplicate_policy: command.duplicatePolicy,
                 }
               : {}),
           },
           { ifMatch: batch.edit_token },
         );
-        setSelected((old) => {
-          const next = new Set(old);
-          for (const file of files)
-            next.delete(draftFileKey(batch.id, file.id));
-          return next;
+        // A queued batch is no longer part of this confirmation's retry.
+        // Keep its files selected until the refreshed draft shows the result.
+        setCommand({
+          ...command,
+          selection: command.selection.slice(index + 1),
         });
       }
     } finally {
@@ -546,16 +566,17 @@ export function InboxPage({
               >
                 <DeleteMusicButton
                   title="删除所选草稿"
-                  description={`将所选 ${selectedCount} 首歌曲的上传文件永久删除。`}
+                  description={`将所选 ${pendingCount ?? selectedCount} 首歌曲的上传文件永久删除。`}
                   confirmColor="error"
                   startIcon={<Trash2 size={18} />}
                   disabled={!canDelete}
+                  onOpen={() => captureSelection("delete")}
                   onDelete={() => processSelected("delete")}
                 />
               </Box>
               <Confirm
                 title="导入所选歌曲"
-                text={`按已保存的标签导入 ${selectedCount} 首歌曲。`}
+                text={`按已保存的标签处理 ${pendingCount ?? selectedCount} 首歌曲。${duplicatePolicyDescription[command?.duplicatePolicy ?? preferences.duplicate_policy]}`}
                 onConfirm={() => processSelected("import")}
               >
                 {(open) => (
@@ -564,7 +585,10 @@ export function InboxPage({
                     variant="contained"
                     startIcon={<Import size={18} />}
                     disabled={busy || !chosen.length}
-                    onClick={open}
+                    onClick={() => {
+                      captureSelection("import");
+                      open();
+                    }}
                   >
                     导入
                   </Button>
@@ -588,8 +612,9 @@ export function InboxPage({
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
           <TextField
             select
-            label="重复文件"
+            label="重复文件或音频"
             value={preferences.duplicate_policy}
+            helperText={duplicatePolicyDescription[preferences.duplicate_policy]}
             onChange={(event) =>
               setPreferences({
                 duplicate_policy: event.target
@@ -597,7 +622,7 @@ export function InboxPage({
               })
             }
           >
-            <MenuItem value="skip">跳过重复文件</MenuItem>
+            <MenuItem value="skip">跳过重复曲目</MenuItem>
             <MenuItem value="keep">保留副本</MenuItem>
             <MenuItem value="reject">发现重复时停止</MenuItem>
           </TextField>

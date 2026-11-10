@@ -17,6 +17,7 @@ import { Cover } from "./Cover";
 import { HiResBadge } from "./HiResBadge";
 import { PlaybackWave } from "./PlaybackWave";
 import {
+  albumLocationLabel,
   audioQuality,
   filename,
   type Album,
@@ -61,10 +62,7 @@ export function AlbumRow({
   const { notify } = useAppActions();
   const { playback, playing, togglePlayback } = usePlayback();
   const currentAlbum = Boolean(
-    playback &&
-      !playback.batchID &&
-      `${playback.track.tags.album_artist || playback.track.tags.artist}\0${playback.track.tags.album}` ===
-        album.key,
+    playback && !playback.batchID && playback.track.album_key === album.key,
   );
   const albumPlaying = currentAlbum && playing;
   const [expanded, setExpanded] = useState(false);
@@ -84,6 +82,7 @@ export function AlbumRow({
   useProgressNotice(preparingPlayback, "准备播放", album.title || "未分类");
   const reduceMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
   const panelID = useId();
+  const location = albumLocationLabel(album.location);
   async function playAlbum() {
     if (currentAlbum) {
       togglePlayback();
@@ -108,14 +107,14 @@ export function AlbumRow({
         <Box className="album-result album-summary" data-expanded={expanded}>
           <ButtonBase
             className="album-cover-play"
-            aria-label={`${albumPlaying ? "暂停专辑" : currentAlbum ? "继续播放专辑" : "播放专辑"} ${album.title || "未分类"}`}
+            aria-label={`${albumPlaying ? "暂停专辑" : currentAlbum ? "继续播放专辑" : "播放专辑"} ${album.title || "未分类"}${location ? " · " + location : ""}`}
             aria-pressed={albumPlaying}
             data-playing={albumPlaying}
             aria-busy={preparingPlayback}
             disabled={preparingPlayback}
             onClick={() => void playAlbum()}
           >
-            <Cover id={album.cover_id} size={44} />
+            <Cover albumKey={album.key} size={44} />
             <Box
               component="span"
               className="album-cover-play-overlay"
@@ -163,10 +162,12 @@ export function AlbumRow({
                 className="library-entry-subtitle"
                 variant="body2"
                 color="text.secondary"
+                title={location}
                 noWrap
               >
                 {album.artist || "未知歌手"}
                 {album.year ? " · " + album.year : ""}
+                {location ? " · " + location : ""}
               </Typography>
             </Box>
             <Box
@@ -185,7 +186,7 @@ export function AlbumRow({
         </Box>
         {showEditActions ? (
           <IconAction
-            label={`编辑专辑 ${album.title || "未分类"}`}
+            label={`编辑专辑 ${album.title || "未分类"}${location ? " · " + location : ""}`}
             tooltip="编辑专辑"
             onClick={() => onAlbumEdit(album)}
           >

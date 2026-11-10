@@ -45,3 +45,40 @@ func TestCatalogPreservesAlbumIdentityFiltersAndWholeAlbumClassification(t *test
 		t.Fatal("response exposed immutable tracks")
 	}
 }
+
+func TestCatalogSeparatesPhysicalEditionsAndGroupsEquivalentTags(t *testing.T) {
+	tracks := []Track{
+		{ID: "first", Path: "Release/CD1/01.flac", Tags: Tags{Title: "First", Album: "Groupies", AlbumArtist: "甲 & 乙", Track: "9"}},
+		{ID: "second", Path: "Release/CD2/01.flac", Tags: Tags{Title: "Second", Album: "groupies ", AlbumArtist: "乙＆甲", Track: "1"}},
+		{ID: "remaster", Path: "Remaster/01.flac", Tags: Tags{Title: "Remaster", Album: "Groupies", AlbumArtist: "甲 & 乙", Track: "1"}},
+	}
+	catalog := buildCatalog(tracks)
+	stats := newStatsAccumulator()
+	for _, track := range tracks {
+		stats.add(track)
+	}
+	if catalog.stats.Albums != 2 || catalog.stats.Albums != stats.stats.Albums {
+		t.Fatalf("edition counts disagree: catalog %d scan %d", catalog.stats.Albums, stats.stats.Albums)
+	}
+	if len(catalog.albumMembers(albumKey(tracks[0]))) != 0 {
+		t.Fatal("ambiguous old album key still selects tracks")
+	}
+	release := catalog.projectTrack(catalog.byTrackID["first"]).AlbumKey
+	remaster := catalog.projectTrack(catalog.byTrackID["remaster"]).AlbumKey
+	if release == remaster || catalog.byAlbum[release].Location != "Release" || catalog.byAlbum[remaster].Location != "Remaster" {
+		t.Fatal("physical editions are not distinguishable", catalog.byAlbum)
+	}
+	page := catalog.tracksPage(libraryFilter{album: release}, 0, 100, true)
+	if page.Total != 2 || page.Tracks[0].ID != "first" || page.Tracks[1].ID != "second" || page.Tracks[1].AlbumKey != release {
+		t.Fatal("same-directory spellings or disc ordering split a release", page)
+	}
+	page = catalog.tracksPage(libraryFilter{album: remaster}, 0, 100, true)
+	if page.Total != 1 || page.Tracks[0].ID != "remaster" {
+		t.Fatal("tracks from two physical editions were merged", page)
+	}
+	filtered := catalog.albumsPage(libraryFilter{query: "second"}, 0, "")
+	if filtered.Total != 1 || filtered.Albums[0].Key != release || filtered.Albums[0].Title != catalog.byAlbum[release].Title ||
+		filtered.Albums[0].Location != "Release" || filtered.Albums[0].Count != 1 {
+		t.Fatal("filtered tracks changed the edition label", filtered)
+	}
+}

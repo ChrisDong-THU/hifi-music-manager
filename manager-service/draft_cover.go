@@ -10,8 +10,6 @@ import (
 	"os"
 	"path"
 	"strings"
-
-	"github.com/dhowden/tag"
 )
 
 func draftArtworkDirectory(b Batch) (string, error) {
@@ -30,14 +28,35 @@ func draftArtworkPath(b Batch) (string, error) {
 	return path.Join(dir, b.CoverHash), nil
 }
 
+// One uploaded picture belongs to one release, even if only a subset of a
+// mixed draft is selected for the current import.
+func oneDraftArtworkRelease(tags []Tags, match string) bool {
+	if len(tags) < 2 {
+		return true
+	}
+	identity, year := albumIdentity(tags[0].Album, albumCredit(tags[0])), ""
+	for _, t := range tags {
+		if albumIdentity(t.Album, albumCredit(t)) != identity {
+			return false
+		}
+		if current := editionYear(t.Year); current != "" && (match == "" || match == "new") {
+			if year != "" && year != current {
+				return false
+			}
+			year = current
+		}
+	}
+	return true
+}
+
 // Publish the complete immutable file first, then commit its database reference.
 // A crash can only leave an unreferenced file, which cleanup later reclaims.
 func (a *app) putDraft(b Batch, cover *albumCover, resetCover bool) error {
-	if err := a.checkDraftWritable(b.ID); err != nil {
-		return err
-	}
 	previous, err := get[Batch](a, "batches", b.ID)
 	if err != nil {
+		return err
+	}
+	if err := a.checkDraftWritable(previous); err != nil {
 		return err
 	}
 	if cover != nil {
@@ -136,77 +155,53 @@ func (a *app) draftCover(b Batch) (*albumCover, error) {
 	return parseAlbumCover(data)
 }
 
-func decodeDraft(w http.ResponseWriter, r *http.Request) ([]Tags, *albumCover, bool) {
+func decodeDraft(w http.ResponseWriter, r *http.Request) ([]Tags, string, *albumCover, bool) {
 	var in struct {
-		Tags []Tags `json:"tags"`
+		Tags       []Tags `json:"tags"`
+		AlbumMatch string `json:"album_match"`
 	}
 	if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 		ok := decode(w, r, &in)
-		return in.Tags, nil, ok
+		return in.Tags, in.AlbumMatch, nil, ok
 	}
 	form, cover, err := decodeImageForm(w, r, "cover", 2<<20)
 	if err != nil {
 		problem(w, 400, err)
-		return nil, nil, false
+		return nil, "", nil, false
 	}
 	if cover == nil || json.Unmarshal([]byte(form.Get("tags")), &in.Tags) != nil {
 		problem(w, 400, errors.New("草稿标签或封面无效"))
-		return nil, nil, false
+		return nil, "", nil, false
 	}
-	return in.Tags, cover, true
-}
-
-func serveFileCover(w http.ResponseWriter, r *http.Request, root *os.Root, path string) {
-	if regular(root, path) != nil {
-		http.NotFound(w, r)
-		return
-	}
-	f, err := root.Open(path)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	defer f.Close()
-	metadata, err := tag.ReadFrom(&boundedMetadataReader{ReadSeeker: f, remaining: 64 << 20})
-	if err != nil || metadata.Picture() == nil {
-		http.NotFound(w, r)
-		return
-	}
-	p := metadata.Picture()
-	mime := http.DetectContentType(p.Data)
-	if len(p.Data) > maxAlbumCover || !(mime == "image/jpeg" || mime == "image/png" || mime == "image/gif" || mime == "image/webp") {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", mime)
-	_, _ = w.Write(p.Data)
+	return in.Tags, form.Get("album_match"), cover, true
 }
 
 func (a *app) draftCoverRoutes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/drafts/{id}/cover", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
 		b, err := get[Batch](a, "batches", r.PathValue("id"))
 		if err != nil {
-			a.mu.Unlock()
 			http.NotFound(w, r)
 			return
 		}
 		if b.CoverHash != "" && b.ChosenCandidate == "manual" {
 			cover, err := a.draftCover(b)
-			a.mu.Unlock()
 			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					http.NotFound(w, r)
+					return
+				}
 				problem(w, 500, err)
 				return
 			}
-			w.Header().Set("Content-Type", cover.MIME)
-			_, _ = w.Write(cover.Data)
+			serveArtwork(w, r, cover)
 			return
 		}
-		a.mu.Unlock()
-		if len(b.Files) == 0 {
-			http.NotFound(w, r)
-			return
+		for _, track := range b.Files {
+			if cover := (artworkSource{path: track.Path}).read(r.Context(), a.data); cover != nil {
+				serveArtwork(w, r, cover)
+				return
+			}
 		}
-		serveFileCover(w, r, a.data, b.Files[0].Path)
+		http.NotFound(w, r)
 	})
 }

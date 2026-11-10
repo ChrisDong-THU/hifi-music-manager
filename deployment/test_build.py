@@ -47,6 +47,22 @@ class BuildTests(unittest.TestCase):
             self.assertNotEqual(before, deployer.source_hash([self.root], 'toolchain'))
             self.assertNotEqual(deployer.source_hash([self.root], 'old-node'), deployer.source_hash([self.root], 'new-node'))
 
+    def test_failed_shared_checks_stop_build_before_compilation_or_publication(self):
+        failure = deployer.subprocess.CalledProcessError(1, ['check.py'])
+        with patch.object(deployer, 'PROJECT', self.root), \
+                patch.object(deployer, 'OUTPUT', self.root / 'output'), \
+                patch.object(deployer.shutil, 'which', side_effect=lambda name: 'fixture-' + name), \
+                patch.object(deployer.subprocess, 'check_output', return_value=b'fixture toolchain'), \
+                patch.object(deployer, 'run', side_effect=failure) as run:
+            with self.assertRaises(deployer.subprocess.CalledProcessError) as caught:
+                deployer.build('arm64')
+            self.assertIs(caught.exception, failure)
+            run.assert_called_once_with(
+                [deployer.sys.executable, '-B', self.root / 'scripts/check.py', '--go', 'fixture-go'],
+                cwd=str(self.root))
+            self.assertEqual(list((self.root / 'output').rglob('bundle.zip')), [])
+            self.assertEqual(list((self.root / 'output').rglob('hifi-manager')), [])
+
     def write_bundle(self, changes=None, extra=None):
         data = {'hifi-manager': b'manager'}
         hashes = {name: hashlib.sha256(value).hexdigest() for name, value in data.items()}

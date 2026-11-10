@@ -17,10 +17,14 @@ func TestWebDAVBrowseStreamAndAuthenticationBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	const name = "测试 #1/曲目.flac"
-	for _, file := range []string{name, "manager.db", ".private.flac", "测试 #1/.pending.flac"} {
+	for _, file := range []string{name, "manager.db", ".private.flac", "测试 #1/.pending.flac", "测试 #1/private.jpg"} {
 		if err := a.music.WriteFile(filepath.FromSlash(file), []byte("fLaC audio"), 0600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	cover := testAlbumCover(t, true).Data
+	if err := a.music.WriteFile(filepath.FromSlash("测试 #1/Folder.jpg"), cover, 0600); err != nil {
+		t.Fatal(err)
 	}
 	linked := os.Symlink(filepath.Join(a.music.Name(), filepath.FromSlash(name)), filepath.Join(a.music.Name(), "link.flac")) == nil
 	home := t.TempDir()
@@ -72,8 +76,13 @@ func TestWebDAVBrowseStreamAndAuthenticationBoundaries(t *testing.T) {
 		t.Fatalf("unexpected root listing: %d %s", w.Code, w.Body.String())
 	}
 	if w := request(lan, host, "PROPFIND", collection, "1", dav.password, nil); w.Code != 207 ||
-		!strings.Contains(w.Body.String(), file) || strings.Contains(w.Body.String(), ".pending.flac") {
+		!strings.Contains(w.Body.String(), file) || !strings.Contains(w.Body.String(), collection+"Folder.jpg") ||
+		strings.Contains(w.Body.String(), ".pending.flac") || strings.Contains(w.Body.String(), "private.jpg") {
 		t.Fatalf("unexpected album listing: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(lan, host, "GET", collection+"Folder.jpg", "", dav.password, nil); w.Code != 200 ||
+		w.Header().Get("Content-Type") != "image/jpeg" || w.Body.String() != string(cover) {
+		t.Fatalf("could not fetch album artwork: %d %v", w.Code, w.Header())
 	}
 	if w := request(lan, host, "GET", file, "", dav.password, http.Header{"Range": {"bytes=0-3"}}); w.Code != 206 || w.Body.String() != "fLaC" {
 		t.Fatalf("audio range: %d %q", w.Code, w.Body.String())
@@ -86,7 +95,7 @@ func TestWebDAVBrowseStreamAndAuthenticationBoundaries(t *testing.T) {
 			t.Fatalf("WebDAV accepted write method %s: %d", method, w.Code)
 		}
 	}
-	for _, hidden := range []string{"manager.db", ".private.flac", "%2e%2e/manager/manager.db", "测试%20%231/.pending.flac"} {
+	for _, hidden := range []string{"manager.db", ".private.flac", "%2e%2e/manager/manager.db", "测试%20%231/.pending.flac", "测试%20%231/private.jpg"} {
 		if w := request(lan, host, "GET", "/webdav/"+hidden, "", dav.password, nil); w.Code != 404 {
 			t.Fatalf("WebDAV exposed a private path: %s, %d", hidden, w.Code)
 		}

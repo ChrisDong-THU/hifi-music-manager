@@ -12,6 +12,8 @@ import (
 	library "hifi.local/library"
 )
 
+var mountInfoPathEscapes = strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+
 // Pin the mount generation. A lost or replaced USB must never redirect writes
 // into the system filesystem beneath its old mount point.
 func volumeGuard(volume string) (func() error, error) {
@@ -28,14 +30,7 @@ func volumeGuard(volume string) (func() error, error) {
 		if err != nil {
 			return "", err
 		}
-		unescape := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace
-		for _, line := range strings.Split(string(raw), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) > 6 && unescape(fields[4]) == root {
-				return fields[0], nil
-			}
-		}
-		return "", errors.New("音乐卷未挂载，已停止文件操作")
+		return mountIDAtPath(raw, root)
 	}
 	id, err := lookup()
 	if err != nil {
@@ -58,13 +53,28 @@ func selectionMount(volume, id string) error {
 	if err != nil {
 		return err
 	}
+	return selectionMountInfo(data, volume, id)
+}
+
+func selectionMountInfo(data []byte, volume, id string) error {
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) > 6 && strings.NewReplacer(`\040`, " ", `\134`, `\`).Replace(fields[4]) == volume && fields[0] == id {
+		if len(fields) > 6 && mountInfoPathEscapes.Replace(fields[4]) == volume && fields[0] == id {
 			return nil
 		}
 	}
 	return errors.New("音乐盘挂载代次已改变")
+}
+
+// Both selection and the ongoing guard must decode the same mountinfo path.
+func mountIDAtPath(data []byte, volume string) (string, error) {
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 6 && mountInfoPathEscapes.Replace(fields[4]) == volume {
+			return fields[0], nil
+		}
+	}
+	return "", errors.New("音乐卷未挂载，已停止文件操作")
 }
 
 func anchoredDatabase(home string) (string, *os.File, error) {

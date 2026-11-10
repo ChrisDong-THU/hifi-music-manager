@@ -39,23 +39,16 @@ class PreflightSafetyTests(unittest.TestCase):
             self.assertEqual(endpoint.call_args[0][0]['web_port'], 8787)
             self.assertEqual(endpoint.call_args[0][0]['manager_lan_hostname'], 'nano.local')
 
-    def test_active_library_follows_verified_mount_generation(self):
+    def test_saved_offline_disk_is_not_replaced_by_configured_mount(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory) / 'project'
-            mount = pathlib.Path(directory) / 'new-mount'
-            project = mount / 'hifi-music-nano'
-            project.mkdir(parents=True)
-            identity = 'ab' * 24
-            (project / 'library-id').write_text(identity)
-            (root / 'logs').mkdir(parents=True)
-            selected = str(project / 'music')
-            state = dict(selected=selected, mount=str(mount), data_root=str(project), volume=identity, mount_id='generation-b')
-            (root / 'logs/library-state.json').write_text(json.dumps(state))
-            with patch.object(installer, 'mount_identity', return_value='generation-b'):
-                self.assertEqual(installer.legacy_library(root), selected)
-            for generation in (None, 'generation-a'):
-                with patch.object(installer, 'mount_identity', return_value=generation):
-                    self.assertIsNone(installer.legacy_library(root))
+            root = pathlib.Path(directory)
+            (root / 'config').mkdir()
+            preference = root / 'config/data-disk.json'
+            preference.write_text(json.dumps({'volume_id': 'ab' * 24}))
+            with patch.object(pathlib.Path, 'read_text', side_effect=[preference.read_text(), '']), \
+                 patch.object(installer, 'safe_path') as fallback:
+                self.assertIsNone(installer.find_volume(root, '/media/another-disk'))
+                fallback.assert_not_called()
 
     def test_absent_disk_is_distinct_from_read_only_mount(self):
         with patch.object(pathlib.Path, 'read_text', return_value='31 1 8:1 / /media/music rw - exfat /dev/sda1 rw\n'):

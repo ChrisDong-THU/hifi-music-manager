@@ -145,6 +145,9 @@ func cleanupDirectories(root *os.Root, dir string, each func(string, fs.FileInfo
 	var issues error
 	for _, entry := range entries {
 		info, err := root.Lstat(path.Join(dir, entry.Name()))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err == nil {
 			err = each(entry.Name(), info)
 		}
@@ -154,6 +157,9 @@ func cleanupDirectories(root *os.Root, dir string, each func(string, fs.FileInfo
 }
 
 func uploadTemporary(name string) bool {
+	if strings.HasPrefix(name, uploadStageName) {
+		return hexID(strings.TrimSuffix(strings.TrimPrefix(name, uploadStageName), path.Ext(name)), 32)
+	}
 	_, suffix, ok := strings.Cut(name, ".upload-")
 	return ok && hexID(suffix, 32)
 }

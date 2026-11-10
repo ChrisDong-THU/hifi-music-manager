@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"path/filepath"
 
+	bolt "go.etcd.io/bbolt"
+
 	"hifi.local/manager-service/internal/audioquality"
 )
 
@@ -51,34 +53,28 @@ func (a *app) reportQuality(done, total int, name string) {
 	}
 }
 
+// Decode outside the library file mutex. Each short transaction updates only
+// quality fields on the current draft and verifies its source snapshot first.
 func (a *app) analyzeDraftQuality(id string) (resultErr error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	defer func() { resultErr = a.failDraftStages(id, "quality", resultErr) }()
-	if err := a.checkDraftWritable(id); err != nil {
-		return err
-	}
-	b, err := get[Batch](a, "batches", id)
-	if err != nil {
-		return err
-	}
-	if len(b.Files) == 0 {
-		return errors.New("草稿为空")
-	}
-	b.Quality = qualityForFiles(b.Quality, b.Files)
-	if b.Quality == nil {
-		b.Quality = map[string]qualityResult{}
-	}
-	b.QualityState, b.QualityError = "running", ""
-	if err := a.put("batches", b.ID, b); err != nil {
+	var files []Track
+	if err := a.updateQuality(id, nil, func(current *Batch) error {
+		if len(current.Files) == 0 {
+			return errors.New("草稿为空")
+		}
+		files = current.Files
+		current.Quality = qualityForFiles(current.Quality, files)
+		current.QualityState, current.QualityError = "running", ""
+		return nil
+	}); err != nil {
 		return err
 	}
 	var issues error
-	for i, file := range b.Files {
+	for i, file := range files {
 		if err := a.checkOperation(); err != nil {
 			return err
 		}
-		a.reportQuality(i, len(b.Files), filepath.Base(file.Path))
+		a.reportQuality(i, len(files), filepath.Base(file.Path))
 		result, err := a.analyzeDraftFile(file)
 		if a.operationContext().Err() != nil {
 			return a.operationContext().Err()
@@ -91,23 +87,54 @@ func (a *app) analyzeDraftQuality(id string) (resultErr error) {
 				issues = errors.Join(issues, fmt.Errorf("%s：%w", filepath.Base(file.Path), err))
 			}
 		}
-		if err := a.checkOperation(); err != nil {
+		if err := a.updateQuality(id, files, func(current *Batch) error {
+			if current.Quality == nil {
+				current.Quality = map[string]qualityResult{}
+			}
+			current.Quality[file.ID] = qualityResult{Result: result, SourceHash: file.Hash, CheckedAt: now()}
+			return nil
+		}); err != nil {
 			return err
 		}
-		b.Quality[file.ID] = qualityResult{Result: result, SourceHash: file.Hash, CheckedAt: now()}
-		if err := a.put("batches", b.ID, b); err != nil {
+		a.reportQuality(i+1, len(files), filepath.Base(file.Path))
+	}
+	return errors.Join(issues, a.updateQuality(id, files, func(current *Batch) error {
+		current.QualityState = "done"
+		if issues != nil {
+			current.QualityState, current.QualityError = "failed", issues.Error()
+		}
+		return nil
+	}))
+}
+
+func (a *app) updateQuality(id string, expected []Track, apply func(*Batch) error) error {
+	if err := a.checkOperation(); err != nil {
+		return err
+	}
+	return a.db.Update(func(tx *bolt.Tx) error {
+		b, err := getTx[Batch](tx, "batches", id)
+		if err != nil {
 			return err
 		}
-		a.reportQuality(i+1, len(b.Files), filepath.Base(file.Path))
-	}
-	b.QualityState = "done"
-	if issues != nil {
-		b.QualityState, b.QualityError = "failed", issues.Error()
-	}
-	if err := a.put("batches", b.ID, b); err != nil {
-		return errors.Join(issues, err)
-	}
-	return issues
+		if err := draftWritable(b); err != nil {
+			return err
+		}
+		if expected != nil {
+			if len(expected) != len(b.Files) || b.QualityState != "running" {
+				return errors.New("草稿文件已变更，请重新检测")
+			}
+			for i, file := range b.Files {
+				previous := expected[i]
+				if file.ID != previous.ID || file.Path != previous.Path || file.Hash != previous.Hash {
+					return errors.New("草稿文件已变更，请重新检测")
+				}
+			}
+		}
+		if err := apply(&b); err != nil {
+			return err
+		}
+		return putRecord(tx.Bucket([]byte("batches")), id, b)
+	})
 }
 
 func (a *app) analyzeDraftFile(track Track) (audioquality.Result, error) {

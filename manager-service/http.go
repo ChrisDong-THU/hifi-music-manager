@@ -1,16 +1,13 @@
 package main
 
 import (
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -210,18 +207,22 @@ func (a *app) routes(site http.Handler) http.Handler {
 			problem(w, 409, err)
 			return
 		}
-		tags, cover, ok := decodeDraft(w, r)
+		tags, albumMatch, cover, ok := decodeDraft(w, r)
 		if !ok {
 			return
 		}
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		if err := a.checkDraftIdle(r.PathValue("id")); err != nil {
+		b, err := get[Batch](a, "batches", r.PathValue("id"))
+		if err != nil {
 			problem(w, 409, err)
 			return
 		}
-		b, err := get[Batch](a, "batches", r.PathValue("id"))
-		if err != nil || b.State == "imported" || b.State == "grouped" || b.State == "deleted" || len(tags) != len(b.Files) || len(tags) == 0 {
+		if a.draftTaskActive(b) {
+			problem(w, 409, errDraftBusy)
+			return
+		}
+		if !visibleDraft(b) || len(tags) != len(b.Files) || len(tags) == 0 {
 			problem(w, 400, errors.New("预览数据与草稿不匹配"))
 			return
 		}
@@ -234,18 +235,49 @@ func (a *app) routes(site http.Handler) http.Handler {
 				problem(w, 400, errors.New("该专辑含暂不支持写入封面的格式，目前支持 FLAC 和 MP3"))
 				return
 			}
+			if !b.Files[i].Editable {
+				if t != b.Files[i].Tags {
+					problem(w, 400, errors.New("此格式仅支持保留原始标签"))
+					return
+				}
+				continue
+			}
 			if tags[i], err = patchTags(t, tagValues(t)); err != nil {
 				problem(w, 400, err)
 				return
 			}
-			if !b.Files[i].Editable && t != b.Files[i].Tags {
-				problem(w, 400, errors.New("此格式仅支持保留原始标签"))
+		}
+		if albumMatch != "" {
+			if albumMatch != "new" && !hexID(albumMatch, 64) {
+				problem(w, 400, errors.New("专辑匹配标识无效"))
 				return
 			}
+			index, err := a.readLibraryIndex()
+			if err != nil {
+				problem(w, 500, err)
+				return
+			}
+			identity := albumIdentity(tags[0].Album, albumCredit(tags[0]))
+			for _, t := range tags {
+				if strings.TrimSpace(t.Album) == "" || strings.TrimSpace(albumCredit(t)) == "" ||
+					albumIdentity(t.Album, albumCredit(t)) != identity || albumMatch == "new" && editionYear(t.Year) != editionYear(tags[0].Year) {
+					problem(w, 400, errors.New("请选择同一专辑的曲目，独立版本须使用同一发行年份"))
+					return
+				}
+			}
+			if _, err := chooseAlbum(index.byIdentity[identity], albumMatch, tags[0].Year); err != nil {
+				problem(w, 409, err)
+				return
+			}
+		}
+		if cover != nil && !oneDraftArtworkRelease(tags, albumMatch) {
+			problem(w, 400, errors.New("该草稿包含多张专辑，请按专辑整理后再上传封面"))
+			return
 		}
 		c := Candidate{ID: "manual", Source: "manual", Tags: tags}
 		b.Candidates = []Candidate{c}
 		b.ChosenCandidate = "manual"
+		b.AlbumMatch = albumMatch
 		b.Previewed = true
 		b.State = "ready"
 		b.Message = "标签已保存，等待导入"
@@ -253,7 +285,7 @@ func (a *app) routes(site http.Handler) http.Handler {
 			problem(w, 500, err)
 			return
 		}
-		respond(w, map[string]any{"tags": c.Tags})
+		respond(w, map[string]any{"tags": c.Tags, "album_match": b.AlbumMatch})
 	})
 	m.HandleFunc("POST /api/drafts/{id}/import", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -325,20 +357,35 @@ func (a *app) routes(site http.Handler) http.Handler {
 		http.ServeContent(w, r, filepath.Base(t.Path), st.ModTime(), f)
 	})
 	m.HandleFunc("GET /api/tracks/{id}", func(w http.ResponseWriter, r *http.Request) {
-		t, err := get[Track](a, "tracks", r.PathValue("id"))
+		index, err := a.readLibraryIndex()
 		if err != nil {
+			problem(w, 500, err)
+			return
+		}
+		position, ok := index.byTrackID[r.PathValue("id")]
+		if !ok {
 			problem(w, 404, errors.New("曲目不存在"))
 			return
 		}
-		respond(w, t)
+		respond(w, index.projectTrack(position))
 	})
 	m.HandleFunc("GET /api/tracks/{id}/cover", func(w http.ResponseWriter, r *http.Request) {
-		t, err := get[Track](a, "tracks", r.PathValue("id"))
+		index, err := a.readLibraryIndex()
 		if err != nil {
+			problem(w, 500, err)
+			return
+		}
+		position, ok := index.byTrackID[r.PathValue("id")]
+		if !ok {
 			http.NotFound(w, r)
 			return
 		}
-		serveFileCover(w, r, a.music, t.Path)
+		track := index.tracks[position]
+		cover := (artworkSource{path: track.Path}).read(r.Context(), a.music)
+		if cover == nil {
+			cover = a.releaseArtwork(r.Context(), index, index.byAlbum[index.metadata[position].album])
+		}
+		serveArtwork(w, r, cover)
 	})
 	m.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { problem(w, 404, errors.New("接口不存在")) })
 	m.Handle("/", site)
@@ -386,114 +433,4 @@ func validIDs(w http.ResponseWriter, ids []string) bool {
 		seen[id] = true
 	}
 	return true
-}
-func (a *app) upload(w http.ResponseWriter, r *http.Request) {
-	if err := a.checkDraftIdle(r.PathValue("id")); err != nil {
-		problem(w, 409, err)
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if err := a.checkDraftIdle(r.PathValue("id")); err != nil {
-		problem(w, 409, err)
-		return
-	}
-	b, err := get[Batch](a, "batches", r.PathValue("id"))
-	if err != nil {
-		problem(w, 404, err)
-		return
-	}
-	if err := a.checkDraftWritable(b.ID); err != nil {
-		problem(w, 409, err)
-		return
-	}
-	if b.ParentID != "" || len(b.Children) > 0 {
-		problem(w, 409, errors.New("分组后的草稿不能追加文件，请新建上传"))
-		return
-	}
-	p, err := cleanRelative(r.URL.Query().Get("path"))
-	if err != nil {
-		problem(w, 400, err)
-		return
-	}
-	if !audioExtensions[strings.ToLower(filepath.Ext(p))] {
-		problem(w, 400, errors.New("请选择 FLAC、MP3、M4A、OGG、OPUS、WAV 或 AIFF 文件"))
-		return
-	}
-	dst := uploadsPrefix + b.ID + "/" + p
-	// A completed upload may lose its response. An identical retry is safe;
-	// different content must never overwrite a previously uploaded file.
-	for _, existing := range b.Files {
-		if existing.Path != dst {
-			continue
-		}
-		hash := sha256.New()
-		n, err := io.Copy(hash, http.MaxBytesReader(w, r.Body, 2<<30))
-		if err != nil {
-			problem(w, 400, errors.New("上传未完成或超过单文件 2 GiB 限制"))
-			return
-		}
-		if n == existing.Size && fmt.Sprintf("%x", hash.Sum(nil)) == existing.Hash {
-			if current, err := fileHash(a.data, dst); err == nil && current == existing.Hash {
-				respond(w, existing)
-				return
-			}
-		}
-		problem(w, 409, errors.New("该批次已存在不同内容的同名文件"))
-		return
-	}
-	if len(b.Files) >= 300 {
-		problem(w, 400, errors.New("每个批次最多 300 首"))
-		return
-	}
-	if err = ensureDir(a.data, filepath.Dir(dst)); err != nil {
-		problem(w, 400, err)
-		return
-	}
-	if _, e := a.data.Lstat(dst); !errors.Is(e, os.ErrNotExist) {
-		problem(w, 409, errors.New("该批次已存在同名文件"))
-		return
-	}
-	tmp := dst + ".upload-" + uid()
-	f, err := a.data.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		problem(w, 500, err)
-		return
-	}
-	defer a.data.Remove(tmp)
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<30)
-	_, err = io.Copy(f, r.Body)
-	if err == nil {
-		err = f.Sync()
-	}
-	ce := f.Close()
-	if err == nil {
-		err = ce
-	}
-	if err != nil {
-		problem(w, 400, errors.New("上传未完成或超过单文件 2 GiB 限制"))
-		return
-	}
-	if err = a.data.Rename(tmp, dst); err != nil {
-		problem(w, 500, err)
-		return
-	}
-	t, err := inspectContext(r.Context(), a.data, dst)
-	if err != nil {
-		_ = a.data.Remove(dst)
-		problem(w, 400, fmt.Errorf("文件校验失败：%w", err))
-		return
-	}
-	b.Files = append(b.Files, t)
-	b.ReadState, b.ReadError, b.QualityState, b.QualityError = "queued", "", "queued", ""
-	b.Candidates = nil
-	b.ChosenCandidate = "original"
-	b.State = "ready"
-	b.Message = "上传完成，等待检查预览"
-	if err = a.put("batches", b.ID, b); err != nil {
-		_ = a.data.Remove(dst)
-		problem(w, 500, err)
-		return
-	}
-	respond(w, t)
 }

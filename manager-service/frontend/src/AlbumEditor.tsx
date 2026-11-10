@@ -6,7 +6,7 @@ import { ImageUpload } from "./ImageUpload";
 import { DeleteMusicButton } from "./DeleteMusicButton";
 import { LoadError, Modal } from "./components";
 import { useConditionalQuery } from "./useConditionalQuery";
-import type { Album } from "./types";
+import { albumLocationLabel, type Album } from "./types";
 import { useProgressNotice } from "./ProgressNotice";
 
 const albumFields = {
@@ -22,7 +22,7 @@ type Detail = {
   mixed: Field[];
   count: number;
   editable: boolean;
-  cover_id: string;
+  edit_token: string;
 };
 
 export function AlbumEditor({
@@ -37,22 +37,21 @@ export function AlbumEditor({
     `albums/detail?key=${encodeURIComponent(album.key)}`,
   );
   const detail = resource.data;
-  const [values, setValues] = useState<Values | null>(null);
-  const [changed, setChanged] = useState(new Set<Field>());
+  const [edits, setEdits] = useState<Partial<Values>>({});
   const [cover, setCover] = useState<File | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const location = albumLocationLabel(album.location);
   useProgressNotice(resource.loading, "读取专辑信息");
 
   async function save() {
     if (!detail || !detail.editable || busy) return;
-    const tags = values ?? detail.tags;
     const patch = Object.fromEntries(
-      [...changed]
+      (Object.keys(edits) as Field[])
         .filter(
-          (key) => detail.mixed.includes(key) || tags[key] !== detail.tags[key],
+          (key) => detail.mixed.includes(key) || edits[key] !== detail.tags[key],
         )
-        .map((key) => [key, tags[key]]),
+        .map((key) => [key, edits[key]]),
     );
     if (!cover && !Object.keys(patch).length) {
       notify("没有需要保存的修改");
@@ -65,7 +64,7 @@ export function AlbumEditor({
     setBusy(true);
     setError("");
     try {
-      await enqueue("albums/edit", form);
+      await enqueue("albums/edit", form, { ifMatch: detail.edit_token });
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : "保存失败");
@@ -85,10 +84,15 @@ export function AlbumEditor({
         <>
           <DeleteMusicButton
             title="删除专辑"
-            description={`将《${album.title || "未分类"}》中的全部 ${detail?.count ?? album.count} 首曲目永久删除，确认后无法恢复。`}
+            description={`将${location ? `目录「${location}」中` : ""}《${album.title || "未分类"}》的全部 ${detail?.count ?? album.count} 首曲目永久删除，确认后无法恢复。`}
             disabled={busy || !detail}
             onDelete={async () => {
-              await enqueue("albums/delete", { key: album.key });
+              if (!detail) return;
+              await enqueue(
+                "albums/delete",
+                { key: album.key },
+                { ifMatch: detail.edit_token },
+              );
               onClose();
             }}
           />
@@ -110,6 +114,11 @@ export function AlbumEditor({
         error={error || resource.error}
         retry={detail ? undefined : resource.refresh}
       />
+      {location ? (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          专辑目录 · {location}
+        </Alert>
+      ) : null}
       {detail ? (
         <>
           {!detail.editable ? (
@@ -132,7 +141,7 @@ export function AlbumEditor({
               label="选择专辑封面"
               disabled={!detail.editable || busy}
             >
-              <Cover id={detail.cover_id} size={160} />
+              <Cover albumKey={album.key} size={160} />
             </ImageUpload>
             <Box
               sx={{
@@ -157,13 +166,10 @@ export function AlbumEditor({
                       : undefined
                   }
                   disabled={!detail.editable || busy}
-                  value={(values ?? detail.tags)[key]}
+                  value={edits[key] ?? detail.tags[key]}
                   onChange={(event) => {
-                    setValues((old) => ({
-                      ...(old ?? detail.tags),
-                      [key]: event.target.value,
-                    }));
-                    setChanged((old) => new Set([...old, key]));
+                    const value = event.target.value;
+                    setEdits((old) => ({ ...old, [key]: value }));
                   }}
                 />
               ))}

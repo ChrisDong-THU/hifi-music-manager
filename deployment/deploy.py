@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -93,27 +94,15 @@ def build(architecture):
         print('Build cache hit; frontend and Go checks already passed for these inputs.', file=sys.stderr)
         return bundle_path
     output.mkdir(parents=True, exist_ok=True)
-    run([sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'deployment', '-p', 'test_*.py'], cwd=str(PROJECT))
-    run([sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_*.py'], cwd=str(PROJECT))
-    frontend = PROJECT / 'manager-service/frontend'
-    run([npm, 'run', 'deps:check', '--prefix', frontend, '--', PROJECT / 'downloads/npm-manager-cache'])
-    for task in ('test', 'build'):
-        run([npm, 'run', task, '--prefix', frontend])
-    files = {}
-    run([compiler, 'vet', './...'], cwd=str(PROJECT / 'shared-library'), env=environment)
-    run([compiler, 'test', '-count=1', '-timeout=90s', './...'], cwd=str(PROJECT / 'shared-library'), env=environment)
-    for source, name in [('manager-service', 'hifi-manager')]:
-        directory = PROJECT / source
-        run([compiler, 'vet', './...'], cwd=str(directory), env=environment)
-        run([compiler, 'test', '-count=1', '-timeout=90s', './...'], cwd=str(directory), env=environment)
-        target = output / name
-        target_env = dict(environment, GOOS='linux', GOARCH=architecture)
-        run([compiler, 'build', '-trimpath', '-ldflags=-s -w', '-o', target, '.'], cwd=str(directory), env=target_env)
-        files[name] = hashlib.sha256(target.read_bytes()).hexdigest()
+    run([sys.executable, '-B', PROJECT / 'scripts/check.py', '--go', compiler], cwd=str(PROJECT))
+    directory = PROJECT / 'manager-service'
+    target = output / 'hifi-manager'
+    target_env = dict(environment, GOOS='linux', GOARCH=architecture)
+    run([compiler, 'build', '-trimpath', '-ldflags=-s -w', '-o', target, '.'], cwd=str(directory), env=target_env)
+    files = {target.name: hashlib.sha256(target.read_bytes()).hexdigest()}
     staged = output / 'bundle.zip.next'
     with zipfile.ZipFile(str(staged), 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
-        for name in files:
-            bundle.write(str(output / name), name)
+        bundle.write(str(target), target.name)
         bundle.writestr('manifest.json', json.dumps({'architecture': architecture, 'files': files}, sort_keys=True))
     os.replace(str(staged), str(bundle_path))
     return bundle_path
@@ -124,7 +113,6 @@ def load_device(path):
     if set(device) != {'ssh', 'profile'} or not isinstance(device['profile'], dict):
         raise ValueError('Device file must contain only ssh and profile')
     # SSH aliases retain the user's existing known_hosts trust and key selection.
-    import re
     if not re.fullmatch(r'[A-Za-z0-9_@.:-]+', device['ssh']) or device['ssh'].startswith('-'):
         raise ValueError('Invalid SSH alias/address')
     return device
@@ -156,31 +144,34 @@ def main():
     expected = ['--expect-volume', checked['volume_id']] if checked.get('volume_id') else []
     with zipfile.ZipFile(str(bundle)) as archive:
         manifest = json.loads(archive.read('manifest.json').decode())
-    if not args.reinstall and checked['binary_sha256'] == manifest['files']:
-        print('Executables unchanged; skipping file transfer.', file=sys.stderr)
-        result = json.loads(remote(device['ssh'], ['python3', '-', '--profile-json', profile,
-                    '--reuse-manifest', json.dumps(manifest), '--apply'] + expected, script))
-        result['elapsed_seconds'] = round(time.monotonic() - started, 2)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return
-    # The target installer validates the architecture, exact file list and every hash.
-    # mktemp creates a private staging directory; never unpack arbitrary archive paths.
-    staging = remote(device['ssh'], ['mktemp', '-d', '/tmp/hifi-deploy-XXXXXXXX'])
-    import re
-    if not re.fullmatch('/tmp/hifi-deploy-[A-Za-z0-9]+', staging):
-        raise RuntimeError('Unexpected remote staging directory')
+    command = ['python3', '-', '--profile-json', profile, '--apply'] + expected
+    staged_bundle = None
     try:
-        run(['scp'] + SSH_OPTIONS + [bundle, device['ssh'] + ':' + staging + '/bundle.zip'])
-        command = ['python3', '-', '--profile-json', profile, '--bundle', staging + '/bundle.zip', '--apply'] + expected
+        if not args.reinstall and checked['binary_sha256'] == manifest['files']:
+            print('Executable unchanged; skipping file transfer.', file=sys.stderr)
+            command.extend(['--reuse-manifest', json.dumps(manifest)])
+        else:
+            staging = remote(device['ssh'], ['mktemp', '-d', '/tmp/hifi-deploy-XXXXXXXX'])
+            if not re.fullmatch('/tmp/hifi-deploy-[A-Za-z0-9]+', staging):
+                raise RuntimeError('Unexpected remote staging directory')
+            staged_bundle = staging + '/bundle.zip'
+            run(['scp'] + SSH_OPTIONS + [bundle, device['ssh'] + ':' + staged_bundle])
+            command.extend(['--bundle', staged_bundle])
         if args.reinstall:
             command.append('--reinstall')
         result = json.loads(remote(device['ssh'], command, script))
-        result['elapsed_seconds'] = round(time.monotonic() - started, 2)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
     finally:
-        # Exact two paths created above; no recursive deletion or computed parent traversal.
-        remote(device['ssh'], ['python3', '-c',
-            'import os; p=' + repr(staging + '/bundle.zip') + '; os.unlink(p) if os.path.exists(p) else None; os.rmdir(' + repr(staging) + ')'])
+        if staged_bundle is not None:
+            # Remove only the bundle and its verified staging directory.
+            # A cleanup failure must not replace the installation/copy outcome.
+            try:
+                remote(device['ssh'], ['python3', '-c',
+                    'import os; p=' + repr(staged_bundle) + '; os.unlink(p) if os.path.exists(p) else None; os.rmdir(' + repr(staging) + ')'])
+            except (OSError, subprocess.SubprocessError) as error:
+                print('Warning: remote staging cleanup failed for ' + staging + ': ' + str(error),
+                      file=sys.stderr)
+    result['elapsed_seconds'] = round(time.monotonic() - started, 2)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':

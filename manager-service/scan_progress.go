@@ -11,17 +11,20 @@ type libraryStats struct {
 }
 
 type statsAccumulator struct {
-	stats           libraryStats
-	artists, albums map[string]bool
+	stats   libraryStats
+	artists map[string]bool
+	albums  map[albumGroup]bool
 }
 
 func newStatsAccumulator() *statsAccumulator {
-	return &statsAccumulator{artists: map[string]bool{}, albums: map[string]bool{}}
+	return &statsAccumulator{artists: map[string]bool{}, albums: map[albumGroup]bool{}}
 }
 
 func (s *statsAccumulator) add(t Track) {
-	s.artists[libraryArtist(t)] = true
-	s.albums[albumKey(t)] = true
+	for _, name := range artistCreditNames(libraryArtist(t)) {
+		s.artists[name] = true
+	}
+	s.albums[albumGroup{albumIdentity(t.Tags.Album, albumCredit(t.Tags)), albumLocation(t.Path, t.Tags)}] = true
 	s.stats.Tracks++
 	s.stats.Artists, s.stats.Albums = len(s.artists), len(s.albums)
 	s.stats.Bytes += t.Size

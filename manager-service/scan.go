@@ -67,6 +67,19 @@ func (a *app) scanLocked(report func(libraryStats, int, int)) error {
 	if err := a.checkOperation(); err != nil {
 		return err
 	}
+	batches, err := readAll[Batch](a, "batches")
+	if err != nil {
+		return err
+	}
+	pendingPaths := map[string]bool{}
+	issues := []string{}
+	for i := range batches {
+		if err := a.reconcileImport(&batches[i]); err != nil {
+			name := batches[i].PendingImport.Result.Path
+			pendingPaths[identityText(name)] = true
+			issues = append(issues, filepath.Base(name)+"：上次导入尚未核验")
+		}
+	}
 	paths := []string{}
 	ctx := a.operationContext()
 	if err := walkAudio(ctx, a.music, ".", &paths, 0); err != nil {
@@ -81,12 +94,14 @@ func (a *app) scanLocked(report func(libraryStats, int, int)) error {
 		old[t.Path] = t
 	}
 	tracks := []Track{}
-	issues := []string{}
 	stats := newStatsAccumulator()
 	report(stats.stats, 0, len(paths))
 	for index, p := range paths {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if len(pendingPaths) > 0 && pendingPaths[identityText(p)] {
+			continue
 		}
 		var t Track
 		var inspectErr error
@@ -101,6 +116,9 @@ func (a *app) scanLocked(report func(libraryStats, int, int)) error {
 			if inspectErr == nil {
 				if prev, ok := old[p]; ok {
 					t.ID, t.Added = prev.ID, prev.Added
+					if t.Hash == prev.Hash {
+						t.AlbumArtworkFallback = prev.AlbumArtworkFallback
+					}
 				}
 			}
 		}
@@ -139,11 +157,7 @@ func (a *app) scanLocked(report func(libraryStats, int, int)) error {
 			}
 		}
 		for _, t := range tracks {
-			raw, e := marshal(t)
-			if e != nil {
-				return e
-			}
-			if e = b.Put([]byte(t.ID), raw); e != nil {
+			if e := putRecord(b, t.ID, t); e != nil {
 				return e
 			}
 		}

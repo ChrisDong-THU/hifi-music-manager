@@ -26,12 +26,14 @@ API 与内嵌前端共同构建。接口返回 JSON，错误为 `{error}`；后�
 | `POST /api/drafts/{id}/prepare` | `{}`；读取、分组并检测 |
 | `POST /api/drafts/{id}/preview` | `{}`；重新读取文件标签 |
 | `POST /api/drafts/{id}/quality` | `{}`；重新检测音源 |
-| `POST /api/drafts/{id}/tags` | `{tags}` 或包含 `tags` JSON 与 `cover` 的表单 → 200 `{tags}` |
+| `POST /api/drafts/{id}/tags` | `{tags, album_match?}` 或包含对应字段与 `cover` 的表单 |
 | `POST /api/drafts/{id}/import` | `{ids, duplicate_policy}` |
 | `POST /api/drafts/{id}/delete` | `{ids}` |
 | `POST /api/drafts/{id}/discard` | `{}`；仅移除完全空的草稿 |
 
-标签保存、导入和删除须把读取到的 `edit_token` 原样放入 `If-Match`。缺少返回 428，过期返回 412；排队命令执行前再次核验。`ids` 必须非空，重复策略为 `keep`、`skip` 或 `reject`。
+标签保存、导入和删除须把读取到的 `edit_token` 原样放入 `If-Match`。缺少返回 428，过期返回 412；排队命令执行前再次核验。`ids` 必须非空，重复策略为 `keep`、`skip` 或 `reject`。显式选定专辑位置或独立版本后，`skip` 不会用其他专辑中的相同音频替代所选位置；要导入跨版本副本，请用 `keep`。
+
+`GET /api/albums/matches?title=…&artist=…&year=…` 返回 `matches` 和 `requires_choice`。候选的 `location` 相对于音乐目录，`key` 可随草稿标签保存为 `album_match`，`year_conflict` 表示候选内的曲目发行年份不一致。单一且无年份冲突的匹配会自动复用。位置或年份有冲突时，须保存候选键或以 `new` 选择独立版本。`new` 要求曲目具有统一的明确年份，同名同歌手且同年份的发行版也可单独保存。导入会按当前曲库重新校验所选位置。
 
 状态与草稿摘要支持 ETag / 304。`revision` 是失效提示，不能替代编辑令牌或跨接口事务。详情用于初始化编辑表单，不能使用剔除歌词的摘要代替。
 
@@ -40,6 +42,8 @@ API 与内嵌前端共同构建。接口返回 JSON，错误为 `{error}`；后�
 `GET /api/tracks`、`/api/albums` 支持分页和筛选；响应包含对应数组、`total` 和 `revision`，追加页必须属于同一曲库代次。`GET /api/artists` 返回歌手摘要。
 
 曲目修改与删除使用 `POST /api/tracks/edit`、`/api/tracks/delete`；专辑使用 `/api/albums/detail`、`/api/albums/edit`、`/api/albums/delete`；歌手资料使用 `/api/artists/detail`、`/api/artists/edit`。
+
+专辑详情包含 `edit_token`。专辑编辑和删除同样须提交 `If-Match`，任务执行前核验当前专辑的曲目和文件摘要。同名专辑分布在不同目录时，各目录有自己的查询键。
 
 音频支持 HTTP Range。修改是直接提交，部分成功与清理规则见[存储与操作](STORAGE.md)。
 WebDAV 连接信息由 `GET /api/system/webdav` 提供，需要管理会话，不要求有活动盘。启用时返回 `enabled`、`url`、`username`、`password`，禁用时仅返回 `{"enabled":false}`。该响应不得缓存。播放器使用返回的独立凭据连接 `/webdav/`。

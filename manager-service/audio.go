@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -19,6 +20,8 @@ import (
 )
 
 var audioExtensions = map[string]bool{".flac": true, ".mp3": true, ".m4a": true, ".ogg": true, ".opus": true, ".wav": true, ".aiff": true, ".aif": true}
+
+var errUnsafeFilePath = errors.New("不是安全的普通文件路径")
 
 func cleanRelative(p string) (string, error) {
 	p = strings.ReplaceAll(p, "\\", "/")
@@ -42,13 +45,13 @@ func regular(root *os.Root, p string) error {
 			return err
 		}
 		if st.Mode()&os.ModeSymlink != 0 {
-			return errors.New("不读取符号链接")
+			return fmt.Errorf("不读取符号链接：%w", errUnsafeFilePath)
 		}
 		if i < len(parts)-1 && !st.IsDir() {
-			return errors.New("路径包含普通文件")
+			return fmt.Errorf("路径包含普通文件：%w", errUnsafeFilePath)
 		}
 		if i == len(parts)-1 && !st.Mode().IsRegular() {
-			return errors.New("不是普通文件")
+			return errUnsafeFilePath
 		}
 	}
 	return nil
@@ -127,28 +130,36 @@ func flacHeader(f io.ReadSeeker) ([]flacBlock, int64, error) {
 	}
 	return nil, 0, errors.New("FLAC 标签块过多")
 }
-func audioDigest(ctx context.Context, f *os.File, format string) (string, float64, error) {
+
+type audioLayout struct {
+	start, end int64
+	seconds    float64
+	comments   []byte
+}
+
+func inspectAudioLayout(ctx context.Context, f *os.File, format string, size int64) (audioLayout, error) {
 	if err := ctx.Err(); err != nil {
-		return "", 0, err
+		return audioLayout{}, err
 	}
-	st, err := f.Stat()
-	if err != nil {
-		return "", 0, err
-	}
-	start, end := int64(0), st.Size()
-	seconds := float64(0)
+	layout := audioLayout{end: size}
 	switch format {
 	case "FLAC":
 		blocks, off, e := flacHeader(operationReadSeeker{ReadSeeker: f, ctx: ctx})
 		if e != nil {
-			return "", 0, e
+			return audioLayout{}, e
 		}
-		start = off
+		layout.start = off
+		for _, block := range blocks[1:] {
+			if block.kind == 4 {
+				layout.comments = block.data
+				break
+			}
+		}
 		v := binary.BigEndian.Uint64(blocks[0].data[10:18])
 		rate := v >> 44
 		samples := v & 0xfffffffff
 		if rate > 0 {
-			seconds = float64(samples) / float64(rate)
+			layout.seconds = float64(samples) / float64(rate)
 		}
 	case "MP3":
 		var h [10]byte
@@ -156,28 +167,28 @@ func audioDigest(ctx context.Context, f *os.File, format string) (string, float6
 		if string(h[:3]) == "ID3" {
 			for _, b := range h[6:10] {
 				if b&128 != 0 {
-					return "", 0, errors.New("无效 ID3 长度")
+					return audioLayout{}, errors.New("无效 ID3 长度")
 				}
 			}
-			start = 10 + int64(h[6])<<21 + int64(h[7])<<14 + int64(h[8])<<7 + int64(h[9])
+			layout.start = 10 + int64(h[6])<<21 + int64(h[7])<<14 + int64(h[8])<<7 + int64(h[9])
 			if h[3] == 4 && h[5]&16 != 0 {
-				start += 10
+				layout.start += 10
 			}
 		}
 		var tail [3]byte
-		if end >= 128 {
-			_, _ = f.ReadAt(tail[:], end-128)
+		if layout.end >= 128 {
+			_, _ = f.ReadAt(tail[:], layout.end-128)
 			if string(tail[:]) == "TAG" {
-				end -= 128
+				layout.end -= 128
 			}
 		}
-		if start+4 > end {
-			return "", 0, errors.New("MP3 缺少音频帧")
+		if layout.start+4 > layout.end {
+			return audioLayout{}, errors.New("MP3 缺少音频帧")
 		}
 		var frame [4]byte
-		_, _ = f.ReadAt(frame[:], start)
+		_, _ = f.ReadAt(frame[:], layout.start)
 		if frame[0] != 255 || frame[1]&224 != 224 {
-			return "", 0, errors.New("MP3 音频帧无效")
+			return audioLayout{}, errors.New("MP3 音频帧无效")
 		}
 		// Estimate VBR duration conservatively; the original stream is never decoded.
 		ver := (frame[1] >> 3) & 3
@@ -188,18 +199,44 @@ func audioDigest(ctx context.Context, f *os.File, format string) (string, float6
 			if ver != 3 {
 				rates = []int{0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160}
 			}
-			seconds = float64(end-start) * 8 / float64(rates[index]*1000)
+			layout.seconds = float64(layout.end-layout.start) * 8 / float64(rates[index]*1000)
 		}
 	}
-	if start >= end {
-		return "", 0, errors.New("文件没有音频数据")
+	if layout.start >= layout.end {
+		return audioLayout{}, errors.New("文件没有音频数据")
 	}
-	_, err = f.Seek(start, 0)
-	if err != nil {
-		return "", 0, err
+	return layout, nil
+}
+
+// Hash the whole file and its audio payload from the same read. Metadata
+// before or after the audio contributes only to the whole-file digest.
+func hashTrack(ctx context.Context, f *os.File, size, start, end int64) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
 	}
-	hash, err := digest(operationReader{ctx: ctx, r: io.LimitReader(f, end-start)})
-	return hash, seconds, err
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", "", err
+	}
+	full := sha256.New()
+	audio := sha256.New()
+	reader := operationReader{ctx: ctx, r: f}
+	if start == 0 && end == size {
+		if _, err := io.CopyN(full, reader, size); err != nil {
+			return "", "", err
+		}
+		value := hex.EncodeToString(full.Sum(nil))
+		return value, value, nil
+	}
+	if _, err := io.CopyN(full, reader, start); err != nil {
+		return "", "", err
+	}
+	if _, err := io.CopyN(io.MultiWriter(full, audio), reader, end-start); err != nil {
+		return "", "", err
+	}
+	if _, err := io.CopyN(full, reader, size-end); err != nil {
+		return "", "", err
+	}
+	return hex.EncodeToString(full.Sum(nil)), hex.EncodeToString(audio.Sum(nil)), nil
 }
 
 // Metadata and both content hashes share cancellation. A stopped request or
@@ -227,12 +264,6 @@ func inspectContext(ctx context.Context, root *os.Root, p string) (Track, error)
 	}
 	t := Track{ID: uid(), Path: filepath.ToSlash(p), Format: format, Size: st.Size(), Editable: format == "FLAC" || format == "MP3", Added: now()}
 	t.Modified = st.ModTime().UnixNano()
-	if format == "FLAC" {
-		if _, _, err := flacHeader(operationReadSeeker{ReadSeeker: f, ctx: ctx}); err != nil {
-			return Track{}, err
-		}
-		_, _ = f.Seek(0, 0)
-	}
 	if format == "MP3" {
 		var h [10]byte
 		_, _ = f.ReadAt(h[:], 0)
@@ -243,8 +274,19 @@ func inspectContext(ctx context.Context, root *os.Root, p string) (Track, error)
 			}
 		}
 	}
+	layout, err := inspectAudioLayout(ctx, f, format, st.Size())
+	if err != nil {
+		return Track{}, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return Track{}, err
+	}
 	m, e := tag.ReadFrom(&boundedMetadataReader{ReadSeeker: operationReadSeeker{ReadSeeker: f, ctx: ctx}, remaining: 64 << 20})
+	t.EmbeddedArtwork = artworkAbsent
 	if e == nil {
+		if picture := m.Picture(); picture != nil && readableArtwork(picture.Data) != nil {
+			t.EmbeddedArtwork = artworkPresent
+		}
 		t.Tags = Tags{Title: m.Title(), Artist: m.Artist(), Album: m.Album(), AlbumArtist: m.AlbumArtist(), Genre: m.Genre(), Lyrics: m.Lyrics()}
 		if y := m.Year(); y > 0 {
 			t.Tags.Year = strconv.Itoa(y)
@@ -261,8 +303,16 @@ func inspectContext(ctx context.Context, root *os.Root, p string) (Track, error)
 				t.Tags.Disc += "/" + strconv.Itoa(total)
 			}
 		}
+		if format == "MP3" && m.Format() == tag.ID3v2_4 {
+			readMP3ArtistCredits(operationReadSeeker{ReadSeeker: f, ctx: ctx}, &t.Tags)
+		}
 	} else if format != "MP3" && format != "WAV" {
 		return Track{}, fmt.Errorf("音频标签无法读取：%w", e)
+	}
+	if layout.comments != nil {
+		if err := readFLACArtistCredits(layout.comments, &t.Tags); err != nil {
+			return Track{}, err
+		}
 	}
 	if format == "WAV" {
 		var h [12]byte
@@ -271,17 +321,11 @@ func inspectContext(ctx context.Context, root *os.Root, p string) (Track, error)
 			return Track{}, errors.New("无效 WAV 文件")
 		}
 	}
-	if _, err = f.Seek(0, 0); err != nil {
-		return Track{}, err
-	}
-	t.Hash, err = digest(operationReader{ctx: ctx, r: f})
+	t.Hash, t.AudioHash, err = hashTrack(ctx, f, st.Size(), layout.start, layout.end)
 	if err != nil {
 		return Track{}, err
 	}
-	t.AudioHash, t.Duration, err = audioDigest(ctx, f, format)
-	if err != nil {
-		return Track{}, err
-	}
+	t.Duration = layout.seconds
 	t.AudioInfo = readAudioInfo(f, format)
 	if err := ctx.Err(); err != nil {
 		return Track{}, err
@@ -328,6 +372,76 @@ func parseComments(data []byte) (string, []string, error) {
 	}
 	return v, comments, nil
 }
+
+func readFLACArtistCredits(data []byte, tags *Tags) error {
+	_, comments, err := parseComments(data)
+	if err != nil {
+		return err
+	}
+	var artists, artistList, albumArtists, albumArtistList, albumArtistAlias []string
+	for _, comment := range comments {
+		key, value, _ := strings.Cut(comment, "=")
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		switch strings.ToUpper(key) {
+		case "ARTIST":
+			artists = append(artists, value)
+		case "ARTISTS":
+			artistList = append(artistList, value)
+		case "ALBUMARTIST":
+			albumArtists = append(albumArtists, value)
+		case "ALBUMARTISTS":
+			albumArtistList = append(albumArtistList, value)
+		case "ALBUM_ARTIST", "ALBUM ARTIST":
+			albumArtistAlias = append(albumArtistAlias, value)
+		}
+	}
+	if len(albumArtists) == 0 {
+		albumArtists = albumArtistAlias
+	}
+	// dhowden/tag exposes one value per field. Prefer actual repeated comments
+	// and use the explicit list as a fallback for files tagged by other tools.
+	artistValue := func(values, list []string) string {
+		if len(values) > 1 {
+			return formatArtistCredit(values)
+		}
+		if len(list) != 0 {
+			return formatArtistCredit(list)
+		}
+		if len(values) == 1 {
+			return values[0]
+		}
+		return ""
+	}
+	tags.Artist = artistValue(artists, artistList)
+	tags.AlbumArtist = artistValue(albumArtists, albumArtistList)
+	return nil
+}
+
+func readMP3ArtistCredits(reader operationReadSeeker, tags *Tags) {
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return
+	}
+	// The general reader drops NUL delimiters. Decode these two frames with
+	// the ID3 writer's parser, which retains native ID3v2.4 multiple values.
+	v, err := id3.ParseReader(&boundedMetadataReader{ReadSeeker: reader, remaining: (32 << 20) + 10},
+		id3.Options{Parse: true, ParseFrames: []string{"TPE1", "TPE2"}})
+	if err != nil {
+		return
+	}
+	readCredit := func(frame string, original *string) {
+		value := strings.TrimRight(v.GetTextFrame(frame).Text, "\x00")
+		if strings.ContainsRune(value, 0) {
+			names := strings.Split(value, "\x00")
+			names = slices.DeleteFunc(names, func(name string) bool { return strings.TrimSpace(name) == "" })
+			*original = formatArtistCredit(names)
+		}
+	}
+	readCredit("TPE1", &tags.Artist)
+	readCredit("TPE2", &tags.AlbumArtist)
+}
+
 func writeComments(data []byte, t Tags, masks ...map[string]string) ([]byte, error) {
 	vendor, comments, err := parseComments(data)
 	if err != nil {
@@ -349,13 +463,15 @@ func writeComments(data []byte, t Tags, masks ...map[string]string) ([]byte, err
 			}
 		}
 	}
+	_, changingDate := fields["DATE"]
+	_, changingArtist := fields["ARTIST"]
+	_, changingAlbumArtist := fields["ALBUMARTIST"]
 	kept := []string{}
 	for _, c := range comments {
 		key, _, _ := strings.Cut(c, "=")
 		upper := strings.ToUpper(key)
-		_, changingDate := fields["DATE"]
-		_, changingArtist := fields["ALBUMARTIST"]
-		if (upper == "YEAR" && changingDate) || (upper == "ALBUM_ARTIST" && changingArtist) {
+		if upper == "YEAR" && changingDate || upper == "ARTISTS" && changingArtist ||
+			changingAlbumArtist && (upper == "ALBUM_ARTIST" || upper == "ALBUM ARTIST" || upper == "ALBUMARTISTS") {
 			continue
 		}
 		if _, replace := fields[upper]; !replace {
@@ -364,7 +480,22 @@ func writeComments(data []byte, t Tags, masks ...map[string]string) ([]byte, err
 	}
 	for _, key := range []string{"TITLE", "ARTIST", "ALBUM", "ALBUMARTIST", "GENRE", "DATE", "TRACKNUMBER", "DISCNUMBER", "LYRICS"} {
 		if value, ok := fields[key]; ok && value != "" {
-			kept = append(kept, key+"="+fields[key])
+			if key == "ARTIST" || key == "ALBUMARTIST" {
+				names := artistCreditNames(value)
+				if len(names) > 1 {
+					for _, name := range names {
+						kept = append(kept, key+"="+name)
+					}
+					continue
+				}
+				if len(names) == 1 && strings.HasPrefix(value, `"`) && artistCreditPart(value) != value {
+					// A quoted literal contains a separator. Keep it as one native
+					// name and mark the explicit list for the next read.
+					kept = append(kept, key+"="+names[0], key+"S="+names[0])
+					continue
+				}
+			}
+			kept = append(kept, key+"="+value)
 		}
 	}
 	var out bytes.Buffer
@@ -376,13 +507,8 @@ func writeComments(data []byte, t Tags, masks ...map[string]string) ([]byte, err
 	}
 	return out.Bytes(), nil
 }
-func rewriteFLAC(root *os.Root, p string, t Tags, cover *albumCover, masks ...map[string]string) error {
-	f, err := root.Open(p)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	blocks, _, err := flacHeader(f)
+func rewriteFLAC(in io.ReadSeeker, out io.Writer, t Tags, cover *albumCover, masks ...map[string]string) error {
+	blocks, _, err := flacHeader(in)
 	if err != nil {
 		return err
 	}
@@ -420,12 +546,6 @@ func rewriteFLAC(root *os.Root, p string, t Tags, cover *albumCover, masks ...ma
 		}
 		blocks = kept
 	}
-	tmp := p + ".tag-" + uid()
-	out, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return err
-	}
-	defer root.Remove(tmp)
 	_, err = out.Write([]byte("fLaC"))
 	for i, b := range blocks {
 		if err != nil {
@@ -445,34 +565,25 @@ func rewriteFLAC(root *os.Root, p string, t Tags, cover *albumCover, masks ...ma
 		}
 	}
 	if err == nil {
-		_, err = io.Copy(out, f)
+		_, err = io.Copy(out, in)
 	}
-	if err == nil {
-		err = out.Sync()
-	}
-	ce := out.Close()
-	if err == nil {
-		err = ce
-	}
-	if err != nil {
-		return err
-	}
-	_ = f.Close()
-	return root.Rename(tmp, p)
+	return err
 }
-func rewriteMP3(root *os.Root, p string, t Tags, cover *albumCover, masks ...map[string]string) error {
-	// id3v2 is restricted to a private copy addressed through this root. Its
-	// Save implementation is never allowed to open a user supplied absolute path.
-	in, err := root.Open(p)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	v, err := id3.ParseReader(in, id3.Options{Parse: true})
+
+func rewriteMP3(in *os.File, reader operationReadSeeker, out io.Writer, t Tags, cover *albumCover, masks ...map[string]string) error {
+	v, err := id3.ParseReader(reader, id3.Options{Parse: true})
 	if err != nil {
 		return err
 	}
 	v.SetDefaultEncoding(id3.EncodingUTF8)
+	encodeCredit := func(value string) string {
+		if v.Version() == 4 {
+			if names := artistCreditNames(value); len(names) > 1 {
+				return strings.Join(names, "\x00")
+			}
+		}
+		return value
+	}
 	wanted := func(k string) bool {
 		if len(masks) == 0 {
 			return true
@@ -484,7 +595,7 @@ func rewriteMP3(root *os.Root, p string, t Tags, cover *albumCover, masks ...map
 		v.SetTitle(t.Title)
 	}
 	if wanted("artist") {
-		v.SetArtist(t.Artist)
+		v.SetArtist(encodeCredit(t.Artist))
 	}
 	if wanted("album") {
 		v.SetAlbum(t.Album)
@@ -506,6 +617,9 @@ func rewriteMP3(root *os.Root, p string, t Tags, cover *albumCover, masks ...map
 		key := map[string]string{"album_artist": "TPE2", "track": "TRCK", "disc": "TPOS"}[field]
 		v.DeleteFrames(key)
 		if val != "" {
+			if field == "album_artist" {
+				val = encodeCredit(val)
+			}
 			v.AddTextFrame(key, id3.EncodingUTF8, val)
 		}
 	}
@@ -537,38 +651,67 @@ func rewriteMP3(root *os.Root, p string, t Tags, cover *albumCover, masks ...map
 	if _, err = in.Seek(offset, 0); err != nil {
 		return err
 	}
-	tmp := p + ".tag-" + uid()
-	out, err := root.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	_, err = v.WriteTo(out)
+	if err == nil {
+		_, err = io.Copy(out, reader)
+	}
+	return err
+}
+
+func stageTags(ctx context.Context, root *os.Root, src, dst string, t Tags, cover *albumCover, masks ...map[string]string) error {
+	return stageTagsBetween(ctx, root, src, root, dst, t, cover, masks...)
+}
+
+// Build a single durable candidate directly from the original, including when
+// importing from a separate upload root.
+func stageTagsBetween(ctx context.Context, from *os.Root, src string, to *os.Root, dst string, t Tags, cover *albumCover, masks ...map[string]string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := regular(from, src); err != nil {
+		return err
+	}
+	if err := ensureDir(to, filepath.Dir(dst)); err != nil {
+		return err
+	}
+	in, err := from.Open(src)
 	if err != nil {
 		return err
 	}
-	defer root.Remove(tmp)
-	_, err = v.WriteTo(out)
+	defer in.Close()
+	out, err := to.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	reader := operationReadSeeker{ReadSeeker: in, ctx: ctx}
+	switch strings.ToLower(filepath.Ext(src)) {
+	case ".flac":
+		err = rewriteFLAC(reader, out, t, cover, masks...)
+	case ".mp3":
+		err = rewriteMP3(in, reader, out, t, cover, masks...)
+	default:
+		err = errors.New("当前仅支持写入 FLAC 和 MP3 标签与封面；其他格式可原样入库")
+	}
 	if err == nil {
-		_, err = io.Copy(out, in)
+		err = ctx.Err()
 	}
 	if err == nil {
 		err = out.Sync()
 	}
-	ce := out.Close()
-	if err == nil {
-		err = ce
-	}
-	_ = in.Close()
+	err = errors.Join(err, out.Close())
 	if err != nil {
+		_ = to.Remove(dst)
+	}
+	return err
+}
+
+func writeTags(root *os.Root, p string, t Tags, cover *albumCover, masks ...map[string]string) error {
+	tmp := p + ".tag-" + uid()
+	if err := stageTags(context.Background(), root, p, tmp, t, cover, masks...); err != nil {
 		return err
 	}
+	defer root.Remove(tmp)
 	return root.Rename(tmp, p)
-}
-func writeTags(root *os.Root, p string, t Tags, cover *albumCover, masks ...map[string]string) error {
-	switch strings.ToLower(filepath.Ext(p)) {
-	case ".flac":
-		return rewriteFLAC(root, p, t, cover, masks...)
-	case ".mp3":
-		return rewriteMP3(root, p, t, cover, masks...)
-	default:
-		return errors.New("当前仅支持写入 FLAC 和 MP3 标签与封面；其他格式可原样入库")
-	}
 }
 
 func patchTags(t Tags, patch map[string]string) (Tags, error) {

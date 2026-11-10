@@ -168,12 +168,12 @@ func TestImportSelectionIgnoresUnselectedDuplicatesAndAPISubmitsIDs(t *testing.T
 
 func TestDraftDuplicatesArePerFileAndRecomputedAfterLibraryChanges(t *testing.T) {
 	b := Batch{ID: "draft", Files: []Track{{ID: "a", Hash: "file-a", AudioHash: "audio"}, {ID: "b", Hash: "file-b", AudioHash: "audio"}, {ID: "unknown"}}}
-	result := sortedBatches([]Batch{b}, map[string]bool{"file-a": true, "audio": true})
-	if !reflect.DeepEqual(result[0].Duplicates, []string{"a", "b"}) {
-		t.Fatal("incorrect duplicate files", result[0].Duplicates)
+	result := projectDraft(b, contentIndex{"file-a": 0, "audio": 0}, false)
+	if !reflect.DeepEqual(result.Duplicates, []string{"a", "b"}) {
+		t.Fatal("incorrect duplicate files", result.Duplicates)
 	}
-	result = sortedBatches(result, nil)
-	if !reflect.DeepEqual(result[0].Duplicates, []string{"b"}) {
-		t.Fatal("stale duplicates retained", result[0].Duplicates)
+	result = projectDraft(b, nil, true)
+	if !reflect.DeepEqual(result.Duplicates, []string{"b"}) {
+		t.Fatal("stale duplicates retained", result.Duplicates)
 	}
 }

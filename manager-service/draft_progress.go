@@ -7,6 +7,8 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+var errDraftBusy = errors.New("该条目正在处理，请等待完成")
+
 func (a *app) draftTaskActive(b Batch) bool {
 	a.jobMu.Lock()
 	defer a.jobMu.Unlock()
@@ -24,7 +26,7 @@ func (a *app) checkDraftIdle(id string) error {
 		return err
 	}
 	if a.draftTaskActive(b) {
-		return errors.New("该条目正在处理，请等待完成")
+		return errDraftBusy
 	}
 	return nil
 }
@@ -64,11 +66,7 @@ func (a *app) failDraftStages(id, kind string, cause error) error {
 				fail(&b.QualityState, &b.QualityError)
 			}
 			if changed {
-				raw, err := marshal(b)
-				if err != nil {
-					return err
-				}
-				if err := bucket.Put([]byte(b.ID), raw); err != nil {
+				if err := putRecord(bucket, b.ID, b); err != nil {
 					return err
 				}
 			}
@@ -97,11 +95,7 @@ func (a *app) setDraftStage(id, kind, state, message string) error {
 		if kind == "quality" || kind == "prepare" {
 			b.QualityState, b.QualityError = state, message
 		}
-		raw, err := marshal(b)
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(id), raw)
+		return putRecord(bucket, id, b)
 	})
 }
 
@@ -110,18 +104,18 @@ func (a *app) submitDraftTask(id, kind string) (string, error) {
 	// The worker still serializes all actual reads and writes through a.mu.
 	a.draftSubmitMu.Lock()
 	defer a.draftSubmitMu.Unlock()
-	if err := a.checkDraftWritable(id); err != nil {
-		return "", err
-	}
 	b, err := get[Batch](a, "batches", id)
 	if err != nil {
+		return "", err
+	}
+	if err := a.checkDraftWritable(b); err != nil {
 		return "", err
 	}
 	if len(b.Files) == 0 {
 		return "", errors.New("草稿为空")
 	}
 	if a.draftTaskActive(b) {
-		return "", errors.New("该条目正在处理，请等待完成")
+		return "", errDraftBusy
 	}
 	if err := a.setDraftStage(id, kind, "queued", ""); err != nil {
 		return "", err

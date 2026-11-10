@@ -6,7 +6,7 @@
 
 ## 配置与安装
 
-1. 将 [example.json](../config/devices/example.json) 复制为本地设备配置，例如 `config/devices/local.json`。修改 `ssh` 和 `root`，可填写实际挂载路径作为首次安装的验收提示 `volume`。
+1. 将 [example.json](../config/devices/example.json) 复制为本地设备配置，例如 `config/devices/local.json`。修改 `ssh` 和 `profile.root`，可用 `profile.volume` 指定首次安装时要验收的实际挂载路径。
 2. 把 HTTPS 证书和私钥放到设备服务目录的 `config/` 下。用 IP 访问时，证书须覆盖设备 IP，文件名为 `manager-tls-cert.pem` 和 `manager-tls-key.pem`。使用私有 CA 时，将 CA 证书保存为 `manager-tls-ca.pem`，并在浏览器和播放器中信任该 CA。
 3. 若设备地址会变化，可使用由 Avahi 广播的名称（例如 `nano.local`）。设置 `manager_lan_hostname`，使用覆盖此名称的 `manager-lan-tls-cert.pem`、`manager-lan-tls-key.pem` 和可选 `manager-lan-tls-ca.pem`。监听器会随可信网段内的地址变化重新绑定。
 4. 在构建电脑执行：

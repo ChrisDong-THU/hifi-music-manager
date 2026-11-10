@@ -100,7 +100,7 @@ func TestStateAggregatesFollowTrackCommitsWithoutRebuildingForDraftProgress(t *t
 	if a.index == index {
 		t.Fatal("track deletion did not invalidate aggregates")
 	}
-	if index.stats.Tracks != 1 || !index.hashes["audio"] {
+	if _, ok := index.hashes["audio"]; index.stats.Tracks != 1 || !ok {
 		t.Fatal("new state mutated an older snapshot")
 	}
 }

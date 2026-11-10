@@ -176,31 +176,9 @@ def atomic(path, data, mode):
             os.unlink(temp)
 
 
-def legacy_library(root):
-    """Read the last verified legacy selection during the cutover only."""
-    try:
-        state = json.loads((root / 'logs/library-state.json').read_text())
-        mount = pathlib.Path(state['mount'])
-        selected = str(mount / 'hifi-music-nano/music')
-        generation = mount_identity(str(mount))
-        if (state.get('paused') or not mount.is_absolute() or '..' in mount.parts or not generation or state.get('selected') != selected or
-                state.get('data_root') != str(mount / 'hifi-music-nano') or
-                not re.fullmatch('[0-9a-fA-F]{48}', state.get('volume', '')) or
-                generation != state.get('mount_id')):
-            return None
-        identity = mount / 'hifi-music-nano/library-id'
-        if identity.stat().st_size > 128 or identity.read_text().strip() != state['volume']:
-            return None
-        return selected
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-
-
 MANAGER = 'hifi-manager.service'
 LEGACY_UNITS = ('hifi-bubble-relay.service', 'hifi-bubbleupnp.service',
                 'hifi-music.service', 'hifi-minimserver.service')
-LEGACY_SETTINGS = {'name', 'manage_minim', 'manage_bubble', 'backend_description',
-                   'browse_udn', 'browse_port', 'java_home', 'bubble_public_domain'}
 XML_LIMIT = 2 * 1024 * 1024
 
 
@@ -233,15 +211,11 @@ def find_volume(root, configured):
                 if volume_id(mount) == selected:
                     return mount
         return None  # An explicitly selected offline disk must not be replaced.
-    if (unit_directory() / 'hifi-music.service').is_file():
-        legacy = legacy_library(root)
-        if legacy:
-            return pathlib.Path(legacy).parents[1]
     return safe_path(configured) if configured else None
 
 
 def resolve(profile):
-    p = {key: value for key, value in profile.items() if key not in LEGACY_SETTINGS}
+    p = dict(profile)
     allowed = {'root', 'volume', 'lan_ip', 'lan_cidr', 'web_port', 'manager_public_domain',
                'manager_lan_hostname', 'webdav_public'}
     if set(p) - allowed:

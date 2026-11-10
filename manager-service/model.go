@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,6 +38,7 @@ type Track struct {
 	ID        string  `json:"id"`
 	Path      string  `json:"path"`
 	Tags      Tags    `json:"tags"`
+	AlbumKey  string  `json:"album_key,omitempty"`
 	Format    string  `json:"format"`
 	Size      int64   `json:"size"`
 	Duration  float64 `json:"duration"`
@@ -44,18 +47,22 @@ type Track struct {
 	Editable  bool    `json:"editable"`
 	Added     string  `json:"added"`
 	Modified  int64   `json:"modified_ns,omitempty"`
+	// Empty for tracks indexed before artwork presence was recorded.
+	EmbeddedArtwork artworkPresence `json:"embedded_artwork,omitempty"`
+	// A matched import leaves the prior release artwork authoritative.
+	AlbumArtworkFallback bool `json:"album_artwork_fallback,omitempty"`
 }
 
 type Album struct {
-	Key     string   `json:"key"`
-	Title   string   `json:"title"`
-	Artist  string   `json:"artist"`
-	Year    string   `json:"year"`
-	Count   int      `json:"count"`
-	CoverID string   `json:"cover_id"`
-	Formats []string `json:"formats"`
-	HiRes   bool     `json:"hi_res"`
-	Added   string   `json:"added"`
+	Key      string   `json:"key"`
+	Title    string   `json:"title"`
+	Artist   string   `json:"artist"`
+	Location string   `json:"location,omitempty"`
+	Year     string   `json:"year"`
+	Count    int      `json:"count"`
+	Formats  []string `json:"formats"`
+	HiRes    bool     `json:"hi_res"`
+	Added    string   `json:"added"`
 }
 
 func (t Track) hiResFLAC() bool {
@@ -63,11 +70,14 @@ func (t Track) hiResFLAC() bool {
 }
 
 func albumKey(t Track) string {
-	artist := t.Tags.AlbumArtist
-	if artist == "" {
-		artist = t.Tags.Artist
+	return albumCredit(t.Tags) + "\x00" + t.Tags.Album
+}
+
+func albumCredit(tags Tags) string {
+	if strings.TrimSpace(tags.AlbumArtist) != "" {
+		return tags.AlbumArtist
 	}
-	return artist + "\x00" + t.Tags.Album
+	return tags.Artist
 }
 
 type Candidate struct {
@@ -85,6 +95,8 @@ type Batch struct {
 	Cleanup         []string                 `json:"cleanup,omitempty"` // Forward-only deletion retries; no retained copies.
 	UploadOwner     string                   `json:"upload_owner,omitempty"`
 	CoverHash       string                   `json:"cover_hash,omitempty"`
+	AlbumMatch      string                   `json:"album_match,omitempty"`
+	PendingImport   *importPublication       `json:"pending_import,omitempty"`
 	ID              string                   `json:"id"`
 	Name            string                   `json:"name"`
 	Created         string                   `json:"created"`
@@ -97,7 +109,6 @@ type Batch struct {
 	Children        []string                 `json:"children,omitempty"`
 	ChosenCandidate string                   `json:"chosen_candidate,omitempty"`
 	Previewed       bool                     `json:"previewed"`
-	Duplicates      []string                 `json:"duplicates,omitempty"`
 }
 
 // Operation is a bounded audit summary, never a recovery plan.
@@ -128,6 +139,9 @@ type work struct {
 	fn func() error
 }
 type app struct {
+	uploadStages    sync.Map // Active temporary paths protected from the sweeper.
+	activeUploads   atomic.Int32
+	musicPublishing sync.Map // Short-lived names reserved by a publish fallback.
 	draftSubmitMu   sync.Mutex
 	dataCaseFold    bool
 	maintenanceWake chan struct{}
@@ -144,7 +158,7 @@ type app struct {
 	music           *os.Root
 	artists         *os.Root
 	data            *os.Root
-	mu              sync.Mutex // All file changes and index snapshots are serialized.
+	mu              sync.Mutex // Serializes file publication and cleanup.
 	jobMu           sync.Mutex
 	jobs            map[string]*task
 	scanning        *scanProgress // Protected by jobMu; never persisted as an index.
@@ -255,8 +269,18 @@ func newAppStorage(home, musicPath, dataPath string, guard func() error) (*app, 
 		a.close()
 		return nil, err
 	}
-	// Startup scanning rebuilds the index from published files. Interrupted writes
-	// are reported honestly; there are no inverse operations or automatic rollback.
+	// Reconcile a completed publication before scanning or enabling draft actions.
+	batches, err := readAll[Batch](a, "batches")
+	if err != nil {
+		a.close()
+		return nil, err
+	}
+	for i := range batches {
+		if err := a.reconcileImport(&batches[i]); err != nil {
+			log.Printf("草稿 %s 的上次导入暂无法核验，将重试：%v", batches[i].ID, err)
+		}
+	}
+	// Unfinished commands are reported, never replayed.
 	ops, err := readAll[Operation](a, "operations")
 	if err != nil {
 		a.close()
@@ -271,11 +295,6 @@ func newAppStorage(home, musicPath, dataPath string, guard func() error) (*app, 
 				return nil, err
 			}
 		}
-	}
-	batches, err := readAll[Batch](a, "batches")
-	if err != nil {
-		a.close()
-		return nil, err
 	}
 	for _, b := range batches {
 		stageInterrupted := false
@@ -294,7 +313,7 @@ func newAppStorage(home, musicPath, dataPath string, guard func() error) (*app, 
 				return nil, err
 			}
 		}
-		if b.State == "importing" {
+		if b.State == "importing" && b.PendingImport == nil {
 			b.State, b.Message = "ready", "上次任务中断，已完成部分保留，可继续处理剩余文件"
 			if len(b.Files) == 0 && len(b.Imported) > 0 {
 				b.State = "imported"
@@ -338,21 +357,33 @@ func (a *app) close() {
 	}
 }
 func (a *app) put(bucket, id string, v any) error {
+	return a.db.Update(func(tx *bolt.Tx) error { return putRecord(tx.Bucket([]byte(bucket)), id, v) })
+}
+
+func putRecord(bucket *bolt.Bucket, id string, v any) error {
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return a.db.Update(func(tx *bolt.Tx) error { return tx.Bucket([]byte(bucket)).Put([]byte(id), raw) })
+	return bucket.Put([]byte(id), raw)
 }
 func get[T any](a *app, bucket, id string) (T, error) {
 	var out T
 	err := a.db.View(func(tx *bolt.Tx) error {
-		raw := tx.Bucket([]byte(bucket)).Get([]byte(id))
-		if raw == nil {
-			return os.ErrNotExist
-		}
-		return json.Unmarshal(raw, &out)
+		var err error
+		out, err = getTx[T](tx, bucket, id)
+		return err
 	})
+	return out, err
+}
+
+func getTx[T any](tx *bolt.Tx, bucket, id string) (T, error) {
+	var out T
+	raw := tx.Bucket([]byte(bucket)).Get([]byte(id))
+	if raw == nil {
+		return out, os.ErrNotExist
+	}
+	err := json.Unmarshal(raw, &out)
 	return out, err
 }
 func readAll[T any](a *app, bucket string) ([]T, error) {
@@ -377,11 +408,8 @@ func readAllTx[T any](tx *bolt.Tx, bucket string) ([]T, error) {
 	return out, err
 }
 func libraryArtist(t Track) string {
-	if t.Tags.AlbumArtist != "" {
-		return t.Tags.AlbumArtist
-	}
-	if t.Tags.Artist != "" {
-		return t.Tags.Artist
+	if artist := albumCredit(t.Tags); strings.TrimSpace(artist) != "" {
+		return artist
 	}
 	return "未知歌手"
 }

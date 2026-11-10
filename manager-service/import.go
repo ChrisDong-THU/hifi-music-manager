@@ -12,12 +12,14 @@ import (
 	library "hifi.local/library"
 )
 
+const importReservationSize = 49
+
 func (a *app) importLocked(id, policy string, ids []string) error {
 	b, err := get[Batch](a, "batches", id)
 	if err != nil {
 		return err
 	}
-	if err := a.checkDraftWritable(id); err != nil {
+	if err := a.checkDraftWritable(b); err != nil {
 		return err
 	}
 	if len(b.Files) == 0 {
@@ -34,47 +36,88 @@ func (a *app) importLocked(id, policy string, ids []string) error {
 	if saved == nil && b.ChosenCandidate != "" && b.ChosenCandidate != "original" {
 		return errors.New("请先选择有效的导入预览")
 	}
-	var cover *albumCover
-	if saved != nil {
-		cover, err = a.draftCover(b)
+	var draftArtwork *albumCover
+	if b.CoverHash != "" && saved != nil && oneDraftArtworkRelease(saved, b.AlbumMatch) {
+		draftArtwork, err = a.draftCover(b)
 		if err != nil {
 			return err
 		}
 	}
-	known := map[string]Track{}
-	existing, err := a.readTracks()
+	index, err := a.readLibraryIndex()
 	if err != nil {
 		return err
 	}
-	for _, track := range existing {
-		known[track.AudioHash], known[track.Hash] = track, track
+	seen := contentIndex{}
+	placements := importPlacementPlan{catalog: &index.catalog, root: a.music,
+		new: map[string]string{}, years: map[string]map[string]bool{}}
+	type entry struct {
+		source      Track
+		tags        Tags
+		destination string
+		release     *albumRelease
+		skip        bool
+		duplicate   int
+		earlier     int
+		result      Track
 	}
-	seen := map[string]bool{}
-	importTags := make(map[string]Tags, len(selected))
-	for i, t := range b.Files {
-		if !selected[t.ID] {
+	plan := make([]entry, 0, len(selected))
+	for i, track := range b.Files {
+		if !selected[track.ID] {
 			continue
 		}
-		if cover != nil && !t.Editable {
-			return errors.New("此格式暂不支持写入封面")
-		}
-		tags := t.Tags
+		tags := track.Tags
 		if saved != nil {
 			tags = saved[i]
 		}
-		importTags[t.ID] = tags
-		if !t.Editable && tags != t.Tags {
-			return errors.New("此目录包含只能原样导入的格式，请选择原始标签")
+		position, earlier := index.hashes.find(track), seen.find(track)
+		duplicate := position >= 0 || earlier >= 0
+		if policy == "reject" && duplicate {
+			return errors.New("检测到相同文件或音频：" + filepath.Base(track.Path) + "；请调整重复文件策略")
 		}
-		_, audioDuplicate := known[t.AudioHash]
-		_, fileDuplicate := known[t.Hash]
-		if policy == "reject" && (audioDuplicate || fileDuplicate || seen[t.AudioHash] || seen[t.Hash]) {
-			return errors.New("检测到相同文件或音频：" + filepath.Base(t.Path) + "；请调整重复文件策略")
+		if policy != "skip" || !duplicate {
+			if draftArtwork != nil && !track.Editable {
+				return errors.New("此格式暂不支持写入封面")
+			}
+			if !track.Editable && tags != track.Tags {
+				return errors.New("此目录包含只能原样导入的格式，请选择原始标签")
+			}
+			placements.noteYear(tags)
 		}
-		seen[t.AudioHash], seen[t.Hash] = true, true
-		h, e := a.operationHash(a.data, t.Path)
-		if e != nil || h != t.Hash {
+		seen.add(track, len(plan))
+		h, e := a.operationHash(a.data, track.Path)
+		if e != nil || h != track.Hash {
 			return errors.New("草稿源文件已变化，请重新读取后操作")
+		}
+		plan = append(plan, entry{source: track, tags: tags, skip: policy == "skip" && duplicate, duplicate: position, earlier: earlier})
+	}
+	// Only one existing release can be selected by an explicit draft match.
+	// Build its duplicate lookup lazily, only if a selected track needs it.
+	var releaseHashes contentIndex
+	for i := range plan {
+		item := &plan[i]
+		if !item.skip {
+			item.tags, item.destination, item.release, err = placements.place(item.source, item.tags, b.AlbumMatch)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if b.AlbumMatch == "" {
+			continue
+		}
+		item.release, _, err = placements.match(item.tags, b.AlbumMatch)
+		if err != nil {
+			return err
+		}
+		if releaseHashes == nil && item.release != nil {
+			releaseHashes = contentIndex{}
+			for _, position := range item.release.members {
+				releaseHashes.add(index.tracks[position], position)
+			}
+		}
+		item.duplicate = releaseHashes.find(item.source)
+		if item.duplicate < 0 && (item.earlier < 0 || plan[item.earlier].release != item.release) {
+			return errors.New("相同音频只存在于其他专辑位置；要导入所选版本，请将重复策略设为「保留副本」")
 		}
 	}
 	op, err := a.begin("import", "导入 · "+b.Name)
@@ -86,71 +129,93 @@ func (a *app) importLocked(id, policy string, ids []string) error {
 		return a.fail(&op, err)
 	}
 	fail := func(err error) error {
+		if b.PendingImport != nil {
+			a.wakeMaintenance()
+			return a.fail(&op, err)
+		}
 		b.State = "ready"
 		b.Message = fmt.Sprintf("导入未完成，已保留 %d 首结果，可继续处理剩余文件", len(b.Imported))
 		return a.fail(&op, errors.Join(err, a.put("batches", b.ID, b)))
 	}
 	// Consume one source per committed result. Retries work only on remaining
 	// files; previously published music is never undone after a later failure.
-	for len(selected) > 0 {
-		index := 0
-		for !selected[b.Files[index].ID] {
-			index++
-		}
-		source := b.Files[index]
-		tags := importTags[source.ID]
-		result, duplicate := known[source.AudioHash]
-		if !duplicate {
-			result, duplicate = known[source.Hash]
-		}
-		skipped := policy == "skip" && duplicate
+	var artworkRelease *albumRelease
+	var artwork *albumCover
+	var useExistingArtwork bool
+	for i := range plan {
+		item := &plan[i]
+		source := item.source
+		a.reportImport(id, i, len(plan), filepath.Base(source.Path))
+		var result Track
+		var next Batch
+		var published *Track
+		nextOp := op
+		last := i == len(plan)-1
+		skipped := item.skip
 		if !skipped {
-			result, err = a.publishImport(source, tags, cover)
+			if item.release != artworkRelease {
+				artworkRelease = item.release
+				artwork = draftArtwork
+				_, existing := a.findReleaseArtwork(a.operationContext(), index, item.release)
+				useExistingArtwork = existing != nil
+				if existing != nil {
+					// Keep existing GIF/WebP artwork usable through the album endpoint.
+					// Only validated JPEG/PNG can be embedded into incoming audio.
+					artwork, _ = parseAlbumCover(existing.Data)
+				}
+			}
+			cover := draftArtwork
+			if item.release != nil {
+				cover = artwork
+			}
+			if !source.Editable {
+				cover = nil
+			}
+			result, err = a.publishImport(source, item.tags, cover, item.destination, useExistingArtwork, func(result Track, marker string) error {
+				var err error
+				next, err = consumeImport(b, source, result, false, last)
+				if err != nil {
+					return err
+				}
+				pending := b
+				pending.PendingImport = &importPublication{SourceID: source.ID, OperationID: op.ID, Reservation: marker, Result: result}
+				if err := a.put("batches", pending.ID, pending); err != nil {
+					return err
+				}
+				b = pending
+				return nil
+			})
 			if err != nil {
 				return fail(err)
 			}
-			op.Affected++
+			published = &result
+			nextOp.Affected++
 		} else {
-			op.Skipped++
-		}
-		next := draftWithoutFiles(b, map[string]bool{source.ID: true})
-		next.Cleanup = append(append([]string(nil), b.Cleanup...), source.Path)
-		next.Imported = append(append([]string(nil), b.Imported...), result.ID)
-		if len(next.Files) == 0 {
-			next.State, next.Message = "imported", "已导入曲库，上传源文件已清理"
-			if next.CoverHash != "" {
-				p, e := draftArtworkPath(next)
-				if e != nil {
-					return fail(e)
-				}
-				next.Cleanup = append(next.Cleanup, p)
-				next.CoverHash = ""
+			if item.duplicate >= 0 {
+				result = index.tracks[item.duplicate]
+			} else if item.earlier >= 0 {
+				result = plan[item.earlier].result
+			} else {
+				return fail(errors.New("找不到重复曲目，请重新扫描曲库"))
 			}
-			next.Candidates = nil
-		} else if len(selected) == 1 {
-			next.State, next.Message = "ready", "已导入所选歌曲，剩余歌曲待处理"
+			if err := a.current(result); err != nil {
+				return fail(errors.New("重复曲目已从曲库移除或修改，请重新扫描；草稿文件已保留"))
+			}
+			next, err = consumeImport(b, source, result, true, last)
+			if err != nil {
+				return fail(err)
+			}
+			nextOp.Skipped++
 		}
 		err = a.db.Update(func(tx *bolt.Tx) error {
-			if !skipped {
-				if err := storeTrackTx(tx, result); err != nil {
-					return err
-				}
-			}
-			raw, err := marshal(next)
-			if err != nil {
-				return err
-			}
-			if err = tx.Bucket([]byte("batches")).Put([]byte(next.ID), raw); err != nil {
-				return err
-			}
-			return storeOperationTx(tx, &op)
+			return commitImportTx(tx, next, published, &nextOp)
 		})
 		if err != nil {
 			return fail(err)
 		}
-		b = next
-		delete(selected, source.ID)
-		known[source.AudioHash], known[source.Hash] = result, result
+		b, op = next, nextOp
+		item.result = result
+		a.reportImport(id, i+1, len(plan), filepath.Base(source.Path))
 		if err := a.cleanupBatchLocked(&b); err != nil {
 			if len(b.Files) > 0 {
 				b.State = "ready"
@@ -164,77 +229,153 @@ func (a *app) importLocked(id, policy string, ids []string) error {
 	return a.finish(&op)
 }
 
-// Publish a complete, validated file through a unique temporary path. The final
-// name is reserved exclusively and never overwrites an existing music file.
-func (a *app) publishImport(source Track, tags Tags, cover *albumCover) (Track, error) {
-	dst := destination(source, tags)
-	if _, err := a.music.Lstat(dst); !errors.Is(err, os.ErrNotExist) {
-		if err != nil {
-			return Track{}, err
+func (a *app) reportImport(batch string, done, total int, name string) {
+	a.jobMu.Lock()
+	defer a.jobMu.Unlock()
+	for _, job := range a.jobs {
+		if job.BatchID == batch && job.Kind == "import" && job.State == "running" {
+			job.Done, job.Total, job.Message = done, total, "导入曲目 · "+name
+			return
 		}
-		dst = strings.TrimSuffix(dst, filepath.Ext(dst)) + " (" + uid()[:8] + ")" + filepath.Ext(dst)
 	}
-	if err := ensureDir(a.music, filepath.Dir(dst)); err != nil {
+}
+
+// Stage one complete file in the destination directory so DAV readers only
+// see the published audio. Publication never overwrites an existing name.
+func (a *app) publishImport(source Track, tags Tags, cover *albumCover, dst string, fallbackArtwork bool, prepare func(Track, string) error) (Track, error) {
+	if err := a.checkOperation(); err != nil {
 		return Track{}, err
 	}
-	tmp := filepath.ToSlash(filepath.Join(filepath.Dir(dst), ".hifi-import-"+uid()+filepath.Ext(dst)))
-	defer a.music.Remove(tmp)
-	if err := a.copyOperationFile(a.data, source.Path, a.music, tmp); err != nil {
+	var created []string
+	published := false
+	defer func() {
+		if !published {
+			for i := len(created) - 1; i >= 0; i-- {
+				if info, err := a.music.Lstat(created[i]); err == nil && info.IsDir() {
+					_ = a.music.Remove(created[i])
+				}
+			}
+		}
+	}()
+	if err := ensureDirectories(a.music, filepath.Dir(dst), &created); err != nil {
 		return Track{}, err
 	}
+	ext := filepath.Ext(dst)
+	tmp := filepath.ToSlash(filepath.Join(filepath.Dir(dst), ".hifi-import-"+uid()+ext))
+	ctx := a.operationContext()
+	rewrite := cover != nil || tags != source.Tags
 	var err error
-	if cover != nil || tags != source.Tags {
-		err = writeTags(a.music, tmp, tags, cover, tagDiff(source.Tags, tags))
+	if rewrite {
+		err = stageTagsBetween(ctx, a.data, source.Path, a.music, tmp, tags, cover, tagDiff(source.Tags, tags))
+	} else {
+		err = copyFileContext(ctx, a.data, source.Path, a.music, tmp)
 	}
 	if err != nil {
 		return Track{}, err
 	}
-	result, err := inspectContext(a.operationContext(), a.music, tmp)
+	defer a.music.Remove(tmp)
+	result, err := inspectContext(ctx, a.music, tmp)
 	if err != nil {
 		return Track{}, err
 	}
-	if result.AudioHash != source.AudioHash {
+	result.AlbumArtworkFallback = fallbackArtwork
+	if result.AudioHash != source.AudioHash || !rewrite && result.Hash != source.Hash {
 		return Track{}, errors.New("音频数据校验失败")
+	}
+	if albumIdentity(result.Tags.Album, albumCredit(result.Tags)) != albumIdentity(tags.Album, albumCredit(tags)) {
+		return Track{}, errors.New("写入后的专辑标签与导入目标不一致，请重新读取草稿后重试")
 	}
 	if err := a.checkOperation(); err != nil {
 		return Track{}, err
 	}
-	marker := []byte("hifi-reservation:" + uid())
-	out, err := a.music.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return Track{}, err
+	for suffix := 1; suffix <= 1000; suffix++ {
+		candidate := dst
+		if suffix > 1 {
+			candidate = fmt.Sprintf("%s (%d)%s", strings.TrimSuffix(dst, ext), suffix, ext)
+		}
+		result.Path = candidate
+		err := a.publishReserved(a.music, tmp, candidate, func(marker string) error {
+			return prepare(result, marker)
+		})
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return Track{}, err
+		}
+		published = true
+		return result, nil
 	}
+	return Track{}, errors.New("专辑目录中存在过多同名曲目")
+}
+
+func (a *app) publishStaged(root *os.Root, tmp, dst string) error {
+	if err := a.checkOperation(); err != nil {
+		return err
+	}
+	if err := root.Link(tmp, dst); err == nil || errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return a.publishReserved(root, tmp, dst, nil)
+}
+
+// The reservation belongs to this operation before any recovery record is
+// committed. Scan and WebDAV omit it until the full file is published.
+func (a *app) publishReserved(root *os.Root, tmp, dst string, prepare func(string) error) error {
+	if err := a.checkOperation(); err != nil {
+		return err
+	}
+	if root == a.music {
+		key := identityText(filepath.ToSlash(dst))
+		a.musicPublishing.Store(key, true)
+		defer a.musicPublishing.Delete(key)
+	}
+	marker := []byte("hifi-reservation:" + uid())
+	out, err := root.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	reserved, _ := out.Stat()
 	published := false
+	written := 0
 	defer func() {
 		if published {
 			return
 		}
-		if hash, err := fileHash(a.music, dst); err == nil && hash == library.Hash(marker) {
-			_ = a.music.Remove(dst)
+		info, err := root.Lstat(dst)
+		if err != nil || reserved == nil || !os.SameFile(reserved, info) || info.Size() != int64(written) {
+			return
+		}
+		if hash, err := fileHash(root, dst); err == nil && hash == library.Hash(marker[:written]) {
+			_ = root.Remove(dst)
 		}
 	}()
-	_, err = out.Write(marker)
+	written, err = out.Write(marker)
 	if err == nil {
 		err = out.Sync()
 	}
 	err = errors.Join(err, out.Close())
 	if err != nil {
-		return Track{}, err
+		return err
 	}
-	if hash, err := a.operationHash(a.music, dst); err != nil || hash != library.Hash(marker) {
-		return Track{}, errors.New("导入位置已被其他程序修改")
+	if prepare != nil {
+		if err := prepare(string(marker)); err != nil {
+			return err
+		}
 	}
-	if err := a.music.Rename(tmp, dst); err != nil {
-		return Track{}, err
+	if hash, err := a.operationHash(root, dst); err != nil || hash != library.Hash(marker) {
+		return errors.New("导入位置已被其他程序修改")
+	}
+	if err := root.Rename(tmp, dst); err != nil {
+		return err
 	}
 	published = true
-	result.Path = dst
-	return result, nil
+	return nil
 }
 
 func importReservation(root *os.Root, p string) bool {
 	info, err := root.Lstat(p)
-	if err != nil || !info.Mode().IsRegular() || info.Size() != 49 {
+	if err != nil || !info.Mode().IsRegular() || info.Size() != importReservationSize {
 		return false
 	}
 	f, err := root.Open(p)

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/webdav"
 )
@@ -87,7 +88,7 @@ func (d *musicDAV) serve(w http.ResponseWriter, r *http.Request, next http.Handl
 }
 
 func (a *app) serveDAV(w http.ResponseWriter, r *http.Request) {
-	handler := webdav.Handler{Prefix: davPath, FileSystem: davMusicFS{a.music}, LockSystem: webdav.NewMemLS()}
+	handler := webdav.Handler{Prefix: davPath, FileSystem: davMusicFS{a.music, &a.musicPublishing}, LockSystem: webdav.NewMemLS()}
 	handler.ServeHTTP(w, r)
 }
 
@@ -107,11 +108,47 @@ func davLocalPath(name string) (string, error) {
 	return filepath.Localize(name)
 }
 
-type davMusicFS struct{ root *os.Root }
+type davMusicFS struct {
+	root       *os.Root
+	publishing *sync.Map
+}
 
 func davVisible(info os.FileInfo) bool {
-	return !strings.HasPrefix(info.Name(), ".") && (info.IsDir() ||
-		info.Mode().IsRegular() && audioExtensions[strings.ToLower(filepath.Ext(info.Name()))])
+	name := strings.ToLower(info.Name())
+	if strings.HasPrefix(name, ".") {
+		return false
+	}
+	if info.IsDir() {
+		return true
+	}
+	if !info.Mode().IsRegular() {
+		return false
+	}
+	ext := filepath.Ext(name)
+	if audioExtensions[ext] {
+		return info.Size() > 0
+	}
+	// Music clients can fetch conventional album artwork without extracting
+	// it from a potentially large audio stream. Keep unrelated files private.
+	return davArtworkName(name) && info.Size() > 0 && info.Size() <= maxAlbumCover
+}
+
+func davArtworkName(name string) bool {
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	return (base == "cover" || base == "folder") &&
+		(ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif")
+}
+
+func (f davMusicFS) visible(local string, info os.FileInfo) bool {
+	if !davVisible(info) {
+		return false
+	}
+	if info.Mode().IsRegular() && info.Size() <= importReservationSize {
+		_, pending := f.publishing.Load(identityText(filepath.ToSlash(local)))
+		return !pending && !importReservation(f.root, local)
+	}
+	return true
 }
 
 func (f davMusicFS) stat(ctx context.Context, name string) (string, os.FileInfo, error) {
@@ -134,7 +171,7 @@ func (f davMusicFS) stat(ctx context.Context, name string) (string, os.FileInfo,
 	if err != nil {
 		return "", nil, err
 	}
-	if local != "." && !davVisible(info) {
+	if local != "." && !f.visible(local, info) {
 		return "", nil, fs.ErrNotExist
 	}
 	return local, info, nil
@@ -162,7 +199,7 @@ func (f davMusicFS) OpenFile(ctx context.Context, name string, flag int, _ os.Fi
 		_ = file.Close()
 		return nil, fs.ErrNotExist
 	}
-	return &davReadFile{File: file, ctx: ctx}, nil
+	return &davReadFile{File: file, ctx: ctx, fs: f, name: local}, nil
 }
 
 func (davMusicFS) Mkdir(context.Context, string, os.FileMode) error { return fs.ErrPermission }
@@ -171,7 +208,9 @@ func (davMusicFS) Rename(context.Context, string, string) error     { return fs.
 
 type davReadFile struct {
 	*os.File
-	ctx context.Context
+	ctx  context.Context
+	fs   davMusicFS
+	name string
 }
 
 func (*davReadFile) Write([]byte) (int, error) { return 0, fs.ErrPermission }
@@ -195,7 +234,7 @@ func (f *davReadFile) Readdir(n int) ([]os.FileInfo, error) {
 		}
 		entries, err := f.File.Readdir(count)
 		for _, entry := range entries {
-			if davVisible(entry) {
+			if f.fs.visible(filepath.Join(f.name, entry.Name()), entry) {
 				result = append(result, entry)
 			}
 		}

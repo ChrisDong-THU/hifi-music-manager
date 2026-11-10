@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -23,6 +23,14 @@ import { useAppActions, useAppState } from "./api";
 import { libraryMediaURL } from "./http-client";
 import { navigate } from "./routing";
 import { useConditionalQuery } from "./useConditionalQuery";
+import {
+  albumIdentity,
+  applyAlbumIdentity,
+  DraftAlbumMatches,
+  editionYear,
+  separateAlbumMatch,
+  type AlbumMatch,
+} from "./DraftAlbumMatches";
 import { useProgressNotice } from "./ProgressNotice";
 import {
   draftTitle,
@@ -42,15 +50,15 @@ import { hasActiveFileJobs } from "./jobs";
 
 const commonFields = ["album", "album_artist", "year", "genre"] as const;
 const trackFields = ["title", "artist", "track", "disc"] as const;
-function storedTags(batch: Draft): Tags[] {
-  return batch.files.map((file) => ({ ...file.tags }));
+const tagFields = Object.keys(fields) as (keyof Tags)[];
+function sameTags(left: Tags, right: Tags) {
+  return left === right || tagFields.every((field) => left[field] === right[field]);
 }
+
 function initialTags(batch: Draft): Tags[] {
-  const tags = storedTags(batch);
-  if (batch.has_saved_tags) return tags;
-  return tags.map((tag, index) => {
-    if (!batch.files[index].editable) return tag;
-    const name = filename(batch.files[index].path).replace(/\.[^.]+$/, "");
+  return batch.files.map(({ tags: tag, editable, path }) => {
+    if (batch.has_saved_tags || !editable) return tag;
+    const name = filename(path).replace(/\.[^.]+$/, "");
     const named = name.match(/^(.+?) - (.+?)\[(.+)\]$/);
     const numbered = name.match(/^([0-9]{1,3})[ ._-]+(.+)$/);
     return {
@@ -71,7 +79,7 @@ export function DraftPage({ id }: { id: string }) {
     `drafts/${encodeURIComponent(id)}`,
   );
   useProgressNotice(resource.loading, "读取草稿");
-  if (resource.data) return <PreviewPage batch={resource.data} />;
+  if (resource.data) return <PreviewPage key={id} batch={resource.data} />;
   return (
     <>
       <PageTitle />
@@ -80,12 +88,15 @@ export function DraftPage({ id }: { id: string }) {
   );
 }
 
-function PreviewPage({ batch }: { batch: Draft }) {
+function PreviewPage({ batch: initial }: { batch: Draft }) {
+  const [batch] = useState(initial);
   const { state } = useAppState();
   const { request, refresh } = useAppActions();
   const notices = useNotifications();
-  const [tags, setTags] = useState(() => initialTags(batch));
-  const [saved, setSaved] = useState(() => storedTags(batch));
+  const [{ tags, albumMatch }, setEdit] = useState(() => ({
+    tags: initialTags(batch),
+    albumMatch: batch.album_match ?? "",
+  }));
   const [saving, setSaving] = useState(false);
   const [activeTrack, setActiveTrack] = useState<string | null>(null);
   const [moreTags, setMoreTags] = useState(false);
@@ -96,55 +107,109 @@ function PreviewPage({ batch }: { batch: Draft }) {
     `/api/drafts/${batch.id}/cover?v=${batch.cover_hash || batch.files[0]?.hash || "original"}`,
     state?.library_session || "",
   );
-  const dirty = !!cover || JSON.stringify(tags) !== JSON.stringify(saved);
+  const identity = useMemo(() => albumIdentity(tags), [tags]);
+  const changedTracks = useMemo(
+    () => tags.map((tag, index) => !sameTags(tag, batch.files[index].tags)),
+    [batch, tags],
+  );
+  const commonTags = useMemo(
+    () =>
+      commonFields.map((field) => {
+        const value = tags[0]?.[field] ?? "";
+        return tags.every((tag) => tag[field] === value) ? value : undefined;
+      }),
+    [tags],
+  );
+  const dirty =
+    !!cover ||
+    albumMatch !== (batch.album_match ?? "") ||
+    changedTracks.some(Boolean);
   const busy = saving || hasActiveFileJobs(state?.jobs || []);
-  const editable = !busy;
+  const canSave =
+    dirty && !busy && (albumMatch !== separateAlbumMatch || identity?.completeYear);
+  const editable = !saving;
   const canEditCommon = editable && batch.files.some((file) => file.editable);
   const canEditCover =
     editable &&
     batch.files.length > 0 &&
     batch.files.every((file) => file.editable);
-  function updateTrack(index: number, field: keyof Tags, value: string) {
-    setTags((previous) =>
-      previous.map((tag, i) =>
-        i === index ? { ...tag, [field]: value } : tag,
-      ),
-    );
+  function updateTags(field: keyof Tags, value: string, onlyIndex?: number) {
+    setEdit((previous) => {
+      const next = previous.tags.map((tag, index) =>
+        (onlyIndex === undefined || onlyIndex === index) &&
+        batch.files[index].editable &&
+        tag[field] !== value
+          ? { ...tag, [field]: value }
+          : tag,
+      );
+      let selected = previous.albumMatch;
+      if (
+        selected &&
+        (field === "album" ||
+          field === "album_artist" ||
+          field === "artist" ||
+          field === "year")
+      ) {
+        const current = albumIdentity(previous.tags);
+        const updated = albumIdentity(next);
+        if (
+          current?.title !== updated?.title ||
+          current?.artist !== updated?.artist ||
+          (selected !== separateAlbumMatch &&
+            (current?.year !== updated?.year ||
+              current?.mixedYears !== updated?.mixedYears))
+        )
+          selected = "";
+      }
+      return { tags: next, albumMatch: selected };
+    });
   }
-  function commonValue(field: keyof Tags) {
-    return tags.every((tag) => tag[field] === tags[0]?.[field])
-      ? tags[0]?.[field] || ""
-      : "";
+  function canApply(album: AlbumMatch) {
+    return tags.every((tag, index) => {
+      if (batch.files[index].editable) return true;
+      return (
+        tag.album === album.title &&
+        (tag.album_artist || tag.artist) === album.artist &&
+        (!album.year || !tag.year || editionYear(tag.year) === album.year)
+      );
+    });
+  }
+  function selectAlbum(album: AlbumMatch) {
+    setEdit((previous) => ({
+      tags: previous.tags.map((tag, index) =>
+        batch.files[index].editable ? applyAlbumIdentity(tag, album) : tag,
+      ),
+      albumMatch: album.key,
+    }));
   }
   async function save() {
-    if (!dirty || busy) return;
+    if (!canSave) return;
     setSaving(true);
     setError("");
     const noticeID = notices.begin("保存标签", draftTitle(batch));
     try {
-      let body: FormData | { tags: Tags[] } = { tags };
+      let body: FormData | { tags: Tags[]; album_match: string } = {
+        tags,
+        album_match: albumMatch,
+      };
       if (cover) {
         body = new FormData();
         body.set("tags", JSON.stringify(tags));
         body.set("cover", cover);
+        body.set("album_match", albumMatch);
       }
-      const result = await request<{ tags: Tags[] }>(
+      await request<{ tags: Tags[] }>(
         `drafts/${batch.id}/tags`,
         body,
         { ifMatch: batch.edit_token },
       );
-      setTags(result.tags.map((tag) => ({ ...tag })));
-      setSaved(result.tags.map((tag) => ({ ...tag })));
-      await refresh();
-      setCover(null);
       notices.update(noticeID, { label: "标签已保存", status: "success" });
       navigate("inbox");
+      void refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "保存失败");
-      notices.update(noticeID, {
-        label: e instanceof Error ? e.message : "保存失败",
-        status: "error",
-      });
+      const message = e instanceof Error ? e.message : "保存失败";
+      setError(message);
+      notices.update(noticeID, { label: message, status: "error" });
     } finally {
       setSaving(false);
     }
@@ -155,7 +220,7 @@ function PreviewPage({ batch }: { batch: Draft }) {
         key={field}
         label={fields[field]}
         value={tags[index]?.[field] || ""}
-        onChange={(event) => updateTrack(index, field, event.target.value)}
+        onChange={(event) => updateTags(field, event.target.value, index)}
         disabled={!editable || !batch.files[index].editable}
         multiline={field === "lyrics"}
         minRows={field === "lyrics" ? 3 : undefined}
@@ -252,30 +317,31 @@ function PreviewPage({ batch }: { batch: Draft }) {
                   gap: 2,
                 }}
               >
-                {commonFields.map((field) => (
+                {commonFields.map((field, index) => (
                   <TextField
                     key={field}
                     label={fields[field]}
-                    value={commonValue(field)}
+                    value={commonTags[index] ?? ""}
                     placeholder={
-                      tags.every((tag) => tag[field] === tags[0]?.[field])
-                        ? undefined
-                        : "多个值"
+                      commonTags[index] === undefined ? "多个值" : undefined
                     }
-                    onChange={(event) =>
-                      setTags((previous) =>
-                        previous.map((tag, index) =>
-                          batch.files[index].editable
-                            ? { ...tag, [field]: event.target.value }
-                            : tag,
-                        ),
-                      )
-                    }
+                    onChange={(event) => updateTags(field, event.target.value)}
                     disabled={!canEditCommon}
                   />
                 ))}
               </Box>
             </Box>
+            <DraftAlbumMatches
+              identity={identity}
+              revision={state?.cover_revision ?? 0}
+              selection={albumMatch}
+              disabled={!editable}
+              canApply={canApply}
+              onSelect={selectAlbum}
+              onSelectionChange={(albumMatch) =>
+                setEdit((current) => ({ ...current, albumMatch }))
+              }
+            />
             {batch.files.some((file) => !file.editable) ? (
               <Typography
                 variant="caption"
@@ -308,11 +374,7 @@ function PreviewPage({ batch }: { batch: Draft }) {
             ) : null}
             {batch.files.map((file, index) => {
               const open = activeTrack === file.id;
-              const changed = Object.keys(fields).some(
-                (field) =>
-                  tags[index]?.[field as keyof Tags] !==
-                  file.tags[field as keyof Tags],
-              );
+              const changed = changedTracks[index];
               return (
                 <Box
                   key={file.id}
@@ -425,12 +487,17 @@ function PreviewPage({ batch }: { batch: Draft }) {
                 gap: 2,
               }}
             >
+              {busy && !saving && dirty ? (
+                <Typography variant="caption" color="text.secondary">
+                  文件任务结束后可保存修改。
+                </Typography>
+              ) : null}
               <Box sx={{ display: "flex", gap: 1, ml: "auto" }}>
                 <Button
                   color="secondary"
                   variant="contained"
                   startIcon={<Save size={18} />}
-                  disabled={!dirty || busy}
+                  disabled={!canSave}
                   onClick={() => void save()}
                 >
                   保存修改

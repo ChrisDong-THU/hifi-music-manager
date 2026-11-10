@@ -6,6 +6,7 @@ export function DeleteMusicButton({
   title,
   description,
   disabled,
+  onOpen,
   onDelete,
   startIcon,
   confirmColor = "primary",
@@ -13,6 +14,7 @@ export function DeleteMusicButton({
   title: string;
   description: string;
   disabled: boolean;
+  onOpen?: () => void;
   onDelete: () => Promise<void>;
   startIcon?: ReactNode;
   confirmColor?: "primary" | "secondary" | "error";
@@ -30,7 +32,10 @@ export function DeleteMusicButton({
           variant="outlined"
           startIcon={startIcon}
           disabled={disabled}
-          onClick={open}
+          onClick={() => {
+            onOpen?.();
+            open();
+          }}
           sx={{ mr: "auto", borderColor: "primary.main", flexShrink: 0 }}
         >
           删除

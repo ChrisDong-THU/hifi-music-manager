@@ -64,13 +64,23 @@ func checkTrackCover(t *testing.T, a *app, track Track, cover *albumCover) {
 	}
 }
 
+func editAlbumForTest(a *app, key string, patch map[string]string, cover *albumCover) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	tracks, err := a.readAlbumTracks(key)
+	if err != nil {
+		return err
+	}
+	return a.editAlbumLocked(tracks, patch, cover)
+}
+
 func TestAlbumEditUpdatesTagsAndCoverWhilePreservingTrackIdentityAndAudio(t *testing.T) {
 	a := testApp(t)
 	first := addTrack(t, a, "album/one.flac", "One", 1)
 	second := addTrack(t, a, "album/two.flac", "Two", 2)
 	cover := testAlbumCover(t, false)
 	patch := map[string]string{"album": "New album", "album_artist": "New artist", "genre": "Jazz", "year": "2026"}
-	if err := a.editAlbum(albumKey(first), patch, cover); err != nil {
+	if err := editAlbumForTest(a, albumKey(first), patch, cover); err != nil {
 		t.Fatal(err)
 	}
 	for _, before := range []Track{first, second} {
@@ -95,7 +105,7 @@ func TestAlbumEditUpdatesTagsAndCoverWhilePreservingTrackIdentityAndAudio(t *tes
 	}
 	updatedFirst, _ := get[Track](a, "tracks", first.ID)
 	replacement := testAlbumCover(t, true)
-	if err := a.editAlbum(albumKey(updatedFirst), map[string]string{}, replacement); err != nil {
+	if err := editAlbumForTest(a, albumKey(updatedFirst), map[string]string{}, replacement); err != nil {
 		t.Fatal(err)
 	}
 	for _, track := range a.tracks() {
@@ -144,7 +154,7 @@ func TestMP3AlbumCoverOnlyPreservesAudioAndTags(t *testing.T) {
 	before := a.tracks()[0]
 	for _, jpegFormat := range []bool{true, false} {
 		cover := testAlbumCover(t, jpegFormat)
-		if err = a.editAlbum(albumKey(before), map[string]string{}, cover); err != nil {
+		if err = editAlbumForTest(a, albumKey(before), map[string]string{}, cover); err != nil {
 			t.Fatal(err)
 		}
 		after, _ := get[Track](a, "tracks", before.ID)
@@ -173,22 +183,24 @@ func TestAlbumDetailReportsMixedFieldsAndRejectsInvalidPatch(t *testing.T) {
 	}
 	w := request(a, "GET", "/api/albums/detail?key="+url.QueryEscape(albumKey(first)), "", false)
 	var detail struct {
-		Mixed []string `json:"mixed"`
-		Count int      `json:"count"`
+		Mixed     []string `json:"mixed"`
+		Count     int      `json:"count"`
+		EditToken string   `json:"edit_token"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != 200 || detail.Count != 2 || len(detail.Mixed) != 1 || detail.Mixed[0] != "genre" {
+	if w.Code != 200 || detail.Count != 2 || len(detail.Mixed) != 1 || detail.Mixed[0] != "genre" ||
+		detail.EditToken == "" || detail.EditToken != w.Header().Get("ETag") {
 		t.Fatalf("mixed details incorrect: %s", w.Body.String())
 	}
-	if err := a.editAlbum(albumKey(first), map[string]string{"title": "Wrong scope"}, nil); err == nil {
+	if err := editAlbumForTest(a, albumKey(first), map[string]string{"title": "Wrong scope"}, nil); err == nil {
 		t.Fatal("album editor accepted track field")
 	}
-	if err := a.editAlbum(albumKey(first), map[string]string{}, nil); err == nil {
+	if err := editAlbumForTest(a, albumKey(first), map[string]string{}, nil); err == nil {
 		t.Fatal("empty edit accepted")
 	}
-	if err := a.editAlbum("missing", map[string]string{"genre": "Jazz"}, nil); err == nil {
+	if err := editAlbumForTest(a, "missing", map[string]string{"genre": "Jazz"}, nil); err == nil {
 		t.Fatal("missing album accepted")
 	}
 }
@@ -200,7 +212,9 @@ func TestAlbumMultipartUploadAndValidation(t *testing.T) {
 	a.start(ctx)
 	defer cancel()
 	cover := testAlbumCover(t, false)
-	upload := func(data []byte, csrf bool) *httptest.ResponseRecorder {
+	detail := request(a, "GET", "/api/albums/detail?key="+url.QueryEscape(albumKey(before)), "", false)
+	token := detail.Header().Get("ETag")
+	upload := func(data []byte, csrf bool, token string) *httptest.ResponseRecorder {
 		var body bytes.Buffer
 		form := multipart.NewWriter(&body)
 		_ = form.WriteField("key", albumKey(before))
@@ -211,6 +225,7 @@ func TestAlbumMultipartUploadAndValidation(t *testing.T) {
 		r := httptest.NewRequest("POST", "http://127.0.0.1:8787/api/albums/edit", &body)
 		r.RemoteAddr = "127.0.0.1:12345"
 		r.Header.Set("Content-Type", form.FormDataContentType())
+		r.Header.Set("If-Match", token)
 		if csrf {
 			r.Header.Set(librarySessionHeader, a.librarySession)
 			r.Header.Set("X-CSRF-Token", a.csrf)
@@ -220,15 +235,21 @@ func TestAlbumMultipartUploadAndValidation(t *testing.T) {
 		a.protect(a.routes(http.NotFoundHandler())).ServeHTTP(w, r)
 		return w
 	}
-	if w := upload(cover.Data, false); w.Code != 403 {
+	if w := upload(cover.Data, false, token); w.Code != 403 {
 		t.Fatal("upload did not enforce session")
 	}
 	for _, bad := range [][]byte{[]byte("not a picture"), cover.Data[:24], make([]byte, maxAlbumCover+1)} {
-		if w := upload(bad, true); w.Code != 400 {
+		if w := upload(bad, true, token); w.Code != 400 {
 			t.Fatalf("invalid picture accepted: %d", w.Code)
 		}
 	}
-	w := upload(cover.Data, true)
+	if w := upload(cover.Data, true, ""); w.Code != http.StatusPreconditionRequired {
+		t.Fatal("edit without a snapshot was accepted", w.Code, w.Body.String())
+	}
+	if w := upload(cover.Data, true, `"stale"`); w.Code != http.StatusPreconditionFailed {
+		t.Fatal("stale edit was accepted", w.Code, w.Body.String())
+	}
+	w := upload(cover.Data, true, token)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("upload rejected: %s", w.Body.String())
 	}

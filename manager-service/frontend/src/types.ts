@@ -11,6 +11,7 @@ export type Tags = {
 };
 export type Track = {
   id: string;
+  album_key?: string;
   path: string;
   tags: Tags;
   format: string;
@@ -28,6 +29,7 @@ export type Track = {
 export type Draft = {
   has_saved_tags: boolean;
   edit_token: string;
+  album_match?: string;
   read_state?: DraftStageState;
   read_error?: string;
   quality_state?: DraftStageState;
@@ -122,7 +124,7 @@ export type Album = {
   artist: string;
   year: string;
   count: number;
-  cover_id: string;
+  location?: string;
   formats: string[];
   hi_res: boolean;
 };
@@ -132,7 +134,6 @@ export type Artist = {
   image_url?: string;
   tracks: number;
   albums: number;
-  cover_id: string;
 };
 export type Preferences = {
   duplicate_policy: "skip" | "keep" | "reject";
@@ -170,6 +171,8 @@ export const audioQuality = (track: Track) =>
     .filter(Boolean)
     .join(" · ");
 export const filename = (p: string) => p.split("/").pop() || p;
+export const albumLocationLabel = (location?: string) =>
+  location === "." ? "曲库根目录" : location;
 export function draftTitle(b: Draft): string {
   const tags = b.files.map((file) => file.tags);
   if (!tags.length) return b.name;

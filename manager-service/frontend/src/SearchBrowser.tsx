@@ -22,9 +22,16 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import type { Album, Artist, Track } from "./types";
-import { audioQuality, duration, filename } from "./types";
-import type { Playback } from "./types";
+import {
+  albumLocationLabel,
+  audioQuality,
+  duration,
+  filename,
+  type Album,
+  type Artist,
+  type Playback,
+  type Track,
+} from "./types";
 import { Cover } from "./Cover";
 import { HiResBadge } from "./HiResBadge";
 import { Empty, IconAction, LoadError } from "./components";
@@ -293,35 +300,40 @@ export function SearchBrowser({
             <span>全部专辑</span>
             <ChevronRight size={15} />
           </ButtonBase>
-          {albums.map((album) => (
-            <ButtonBase
-              key={album.key}
-              className="search-result search-album-row"
-              data-selected={albumFilter === album.key}
-              aria-label={`${album.title || "未分类"} ${album.artist || "未知歌手"}`}
-              onClick={() => onAlbum(album)}
-            >
-              <Cover id={album.cover_id} size={42} />
-              <Box component="span" className="search-result-copy">
-                <Box component="span" className="album-title-line">
-                  <Typography component="span" variant="body2" noWrap>
-                    {album.title || "未分类"}
+          {albums.map((album) => {
+            const location = albumLocationLabel(album.location);
+            return (
+              <ButtonBase
+                key={album.key}
+                className="search-result search-album-row"
+                data-selected={albumFilter === album.key}
+                aria-label={`${album.title || "未分类"} ${album.artist || "未知歌手"}${location ? " · " + location : ""}`}
+                onClick={() => onAlbum(album)}
+              >
+                <Cover albumKey={album.key} size={42} />
+                <Box component="span" className="search-result-copy">
+                  <Box component="span" className="album-title-line">
+                    <Typography component="span" variant="body2" noWrap>
+                      {album.title || "未分类"}
+                    </Typography>
+                    {album.hi_res ? <HiResBadge /> : null}
+                  </Box>
+                  <Typography
+                    component="span"
+                    variant="caption"
+                    color="text.secondary"
+                    title={location}
+                    noWrap
+                  >
+                    {album.artist || "未知歌手"}
+                    {album.year ? ` · ${album.year}` : ""}
+                    {location ? ` · ${location}` : ""}
                   </Typography>
-                  {album.hi_res ? <HiResBadge /> : null}
                 </Box>
-                <Typography
-                  component="span"
-                  variant="caption"
-                  color="text.secondary"
-                  noWrap
-                >
-                  {album.artist || "未知歌手"}
-                  {album.year ? ` · ${album.year}` : ""}
-                </Typography>
-              </Box>
-              <ChevronRight size={14} className="search-row-arrow" />
-            </ButtonBase>
-          ))}
+                <ChevronRight size={14} className="search-row-arrow" />
+              </ButtonBase>
+            );
+          })}
           {!loading && !albums.length ? (
             <Empty kind="albums" fill>
               {query.trim() ? "未找到匹配的专辑" : "暂无专辑"}

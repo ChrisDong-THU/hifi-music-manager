@@ -45,11 +45,5 @@ func draftWithoutFiles(b Batch, removed map[string]bool) Batch {
 		next.Candidates = append(next.Candidates, candidate)
 	}
 	next.Quality = qualityForFiles(b.Quality, next.Files)
-	next.Duplicates = nil
-	for _, id := range b.Duplicates {
-		if !removed[id] {
-			next.Duplicates = append(next.Duplicates, id)
-		}
-	}
 	return next
 }
