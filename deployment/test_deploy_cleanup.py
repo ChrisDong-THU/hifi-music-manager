@@ -62,7 +62,7 @@ class CleanupTests(unittest.TestCase):
         self.assertIn('elapsed_seconds', result)
         self.assertIn('cleanup', warning.getvalue().lower())
         self.assertIn(self.staging, warning.getvalue())
-        self.assertEqual(calls[-1].args[1][:2], ['python3', '-c'])
+        self.assertEqual(calls[-1][0][1][:2], ['python3', '-c'])
 
 
 if __name__ == '__main__':
