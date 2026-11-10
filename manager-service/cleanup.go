@@ -87,6 +87,10 @@ func (a *app) cleanupFiles(ctx context.Context, sweep bool) error {
 		return err
 	}
 	protected := map[string]bool{}
+	a.uploadStages.Range(func(key, _ any) bool {
+		protected[key.(string)] = true
+		return true
+	})
 	existing := map[string]bool{}
 	var issues error
 	for i := range batches {
@@ -94,7 +98,9 @@ func (a *app) cleanupFiles(ctx context.Context, sweep bool) error {
 		if err := check(); err != nil {
 			return errors.Join(issues, err)
 		}
-		if err := a.cleanupBatchLocked(b); err != nil {
+		if err := a.reconcileImport(b); err != nil {
+			issues = errors.Join(issues, err)
+		} else if err := a.cleanupBatchLocked(b); err != nil {
 			issues = errors.Join(issues, err)
 		}
 		if b.State != "deleted" && b.State != "imported" {

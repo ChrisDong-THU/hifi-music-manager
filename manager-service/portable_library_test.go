@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,34 +69,5 @@ func TestSeparateUSBIndexesAndResourcesSurviveSwitchBack(t *testing.T) {
 	defer rebuilt.close()
 	if profile := rebuilt.artistProfile("测试歌手"); profile.Biography != "A biography" {
 		t.Fatal("public resource depended on the private index")
-	}
-}
-
-func TestPlaybackFailurePersistsPendingNotificationWithoutFailingSavedResources(t *testing.T) {
-	a := testApp(t)
-	addTrack(t, a, "a.flac", "A", 1)
-	a.rescan = func(context.Context) error { return errors.New("backend offline") }
-	if _, err := a.saveArtistProfile("测试歌手", "saved", testAlbumCover(t, false)); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.syncPlayback(context.Background()); err == nil {
-		t.Fatal("offline backend unexpectedly acknowledged")
-	}
-	state := a.playbackSyncState()
-	if state.Requested == 0 || state.Delivered != 0 || state.Error == "" {
-		t.Fatalf("pending state was not committed: %+v", state)
-	}
-	for _, job := range a.taskSnapshot() {
-		if job.Kind == "sync" && job.State != "running" {
-			t.Fatal("a retryable notification was presented as a failed resource operation")
-		}
-	}
-	a.rescan = func(context.Context) error { return nil }
-	if err := a.syncPlayback(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	state = a.playbackSyncState()
-	if state.Requested != state.Delivered || state.Error != "" {
-		t.Fatal("retry did not acknowledge the pending change")
 	}
 }

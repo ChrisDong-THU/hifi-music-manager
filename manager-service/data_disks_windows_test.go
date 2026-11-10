@@ -37,7 +37,7 @@ func TestStandaloneDiskSwitchClosesIndexesAndKeepsSettingsAvailable(t *testing.T
 		disks = append(disks, d)
 	}
 	aID, bID := library.InspectDisk(disks[0]).VolumeID, library.InspectDisk(disks[1]).VolumeID
-	c := &diskController{project: project, security: &app{csrf: "test", cookieName: "test"}, standalone: true, site: http.NotFoundHandler(),
+	c := &diskController{project: project, security: &app{csrf: "test", cookieName: "test"}, site: http.NotFoundHandler(),
 		list:    func(context.Context) ([]library.Drive, error) { return disks, nil },
 		mounted: func(library.Drive) bool { return true }}
 	defer c.detach()

@@ -2,8 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { takeCompletedJobs, hasActiveFileJobs } from "../src/jobs.ts";
 
-test("playback retries do not lock editing, while queued file work and disk changes do", () => {
-  assert.equal(hasActiveFileJobs([{ kind: "sync", state: "running" }]), false);
+test("queued file work and disk changes lock editing", () => {
   for (const kind of [
     "scan",
     "edit",
@@ -22,7 +21,7 @@ test("playback retries do not lock editing, while queued file work and disk chan
   }
   assert.equal(
     hasActiveFileJobs([
-      { kind: "sync", state: "running" },
+      { kind: "scan", state: "done" },
       { kind: "edit", state: "running" },
     ]),
     true,

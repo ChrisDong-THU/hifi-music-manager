@@ -42,17 +42,16 @@ func (a *app) editLocked(ids []string, patch map[string]string, cover *albumCove
 	for i, t := range before {
 		// Prepare a short-lived replacement; never retain the original as a backup.
 		tmp := filepath.ToSlash(filepath.Join(filepath.Dir(t.Path), ".hifi-edit-"+uid()+filepath.Ext(t.Path)))
-		if err = a.copyOperationFile(a.music, t.Path, a.music, tmp); err != nil {
-			_ = a.music.Remove(tmp)
+		if err = a.checkOperation(); err != nil {
 			return a.fail(&op, err)
 		}
-		err = writeTags(a.music, tmp, afterTags[i], cover, patch)
-		var updated Track
-		if err == nil {
-			updated, err = inspectContext(a.operationContext(), a.music, tmp)
-			if err == nil && updated.AudioHash != t.AudioHash {
-				err = errors.New("音频摘要发生变化，已拒绝写入")
-			}
+		ctx := a.operationContext()
+		if err = stageTags(ctx, a.music, t.Path, tmp, afterTags[i], cover, patch); err != nil {
+			return a.fail(&op, err)
+		}
+		updated, err := inspectContext(ctx, a.music, tmp)
+		if err == nil && updated.AudioHash != t.AudioHash {
+			err = errors.New("音频摘要发生变化，已拒绝写入")
 		}
 		if err != nil {
 			_ = a.music.Remove(tmp)
@@ -61,6 +60,9 @@ func (a *app) editLocked(ids []string, patch map[string]string, cover *albumCove
 		updated.ID = t.ID
 		updated.Path = t.Path
 		updated.Added = t.Added
+		if cover == nil && albumIdentity(updated.Tags.Album, albumCredit(updated.Tags)) == albumIdentity(t.Tags.Album, albumCredit(t.Tags)) {
+			updated.AlbumArtworkFallback = t.AlbumArtworkFallback
+		}
 		if err = a.current(t); err == nil {
 			err = a.music.Rename(tmp, t.Path)
 		}

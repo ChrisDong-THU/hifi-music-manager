@@ -28,6 +28,7 @@ Go dependencies (exact pins in go.mod and go.sum):
   github.com/dhowden/tag: metadata reading, BSD-3-Clause
   github.com/bogem/id3v2/v2: ID3 writing, MIT
   go.etcd.io/bbolt: local embedded storage, MIT
+  golang.org/x/net/webdav: WebDAV request and property handling, BSD-3-Clause
   golang.org/x/sys: platform support, BSD-3-Clause
   golang.org/x/text: text encodings, BSD-3-Clause
 

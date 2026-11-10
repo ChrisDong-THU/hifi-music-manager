@@ -48,7 +48,11 @@ func TestSlowDraftCoverReaderDoesNotBlockMutations(t *testing.T) {
 		t.Fatal("cover response did not start")
 	}
 	locked := make(chan struct{})
-	go func() { a.mu.Lock(); a.mu.Unlock(); close(locked) }()
+	go func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		close(locked)
+	}()
 	select {
 	case <-locked:
 	case <-time.After(time.Second):
@@ -128,6 +132,7 @@ func TestDraftCoverSaveImportAndCleanup(t *testing.T) {
 	}
 	tags := []Tags{b.Files[0].Tags, second.Tags}
 	tags[0].Album, tags[1].Album = "封面专辑", "封面专辑"
+	tags[0].AlbumArtist, tags[1].AlbumArtist = "同一专辑歌手", "同一专辑歌手"
 	cover := testAlbumCover(t, false)
 	w := uploadDraftCover(t, a, b, tags, cover.Data, true)
 	if w.Code != 200 {

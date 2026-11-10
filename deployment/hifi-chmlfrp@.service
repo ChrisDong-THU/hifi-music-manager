@@ -1,6 +1,6 @@
 [Unit]
 Description=HiFi ChmlFrp tunnel (%i)
-After=network-online.target hifi-manager.service hifi-bubble-relay.service
+After=network-online.target hifi-manager.service
 
 [Service]
 Type=simple

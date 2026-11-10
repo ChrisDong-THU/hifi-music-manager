@@ -22,7 +22,7 @@ func TestFreshLayoutAndIdentityAreIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"library-id", "music", "resources/artists", "manager/uploads", "minimserver"} {
+	for _, path := range []string{"library-id", "music", "resources/artists", "manager/uploads"} {
 		if _, err := os.Stat(filepath.Join(DataPath(d.Root), filepath.FromSlash(path))); err != nil {
 			t.Fatal(path, err)
 		}

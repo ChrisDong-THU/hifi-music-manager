@@ -1,12 +1,30 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"testing"
 	"time"
 )
+
+func albumDeleteRequest(a *app, key, token string) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(map[string]string{"key": key})
+	r := httptest.NewRequest("POST", "http://127.0.0.1:8787/api/albums/delete", bytes.NewReader(body))
+	r.RemoteAddr = "127.0.0.1:12345"
+	r.Header.Set(librarySessionHeader, a.librarySession)
+	r.Header.Set("X-CSRF-Token", a.csrf)
+	r.Header.Set("If-Match", token)
+	r.AddCookie(&http.Cookie{Name: a.cookieName, Value: a.csrf})
+	w := httptest.NewRecorder()
+	a.protect(a.routes(http.NotFoundHandler())).ServeHTTP(w, r)
+	return w
+}
 
 func TestAlbumDeletePreservesOtherAlbums(t *testing.T) {
 	a := testApp(t)
@@ -27,7 +45,9 @@ func TestAlbumDeletePreservesOtherAlbums(t *testing.T) {
 	if w := request(a, "POST", "/api/albums/delete", `{"key":""}`, true); w.Code != 400 {
 		t.Fatal("empty album key accepted")
 	}
-	w := request(a, "POST", "/api/albums/delete", string(body), true)
+	detail := request(a, "GET", "/api/albums/detail?key="+url.QueryEscape(albumKey(first)), "", false)
+	token := detail.Header().Get("ETag")
+	w := albumDeleteRequest(a, albumKey(first), token)
 	if w.Code != 202 {
 		t.Fatalf("album deletion rejected: %s", w.Body.String())
 	}
@@ -77,7 +97,33 @@ func TestAlbumDeletePreservesOtherAlbums(t *testing.T) {
 	if deletion.Affected != 2 || deletion.State != "done" {
 		t.Fatal("whole album not recorded in one audit record")
 	}
-	if err := a.deleteAlbum(albumKey(first)); err == nil {
+	if w := albumDeleteRequest(a, albumKey(first), token); w.Code != http.StatusPreconditionFailed {
 		t.Fatal("missing album accepted")
+	}
+}
+
+func TestQueuedAlbumDeletionCannotIncludeNewTracks(t *testing.T) {
+	a := testApp(t)
+	first := addTrack(t, a, "album/one.flac", "One", 1)
+	key := albumKey(first)
+	token := request(a, "GET", "/api/albums/detail?key="+url.QueryEscape(key), "", false).Header().Get("ETag")
+	if w := albumDeleteRequest(a, key, ""); w.Code != http.StatusPreconditionRequired {
+		t.Fatal("deletion without snapshot was accepted", w.Code, w.Body.String())
+	}
+	if w := albumDeleteRequest(a, key, token); w.Code != http.StatusAccepted {
+		t.Fatal("current deletion was rejected", w.Code, w.Body.String())
+	}
+	added := addTrack(t, a, "album/two.flac", "Two", 2)
+	work := <-a.queue
+	if err := work.fn(); !errors.Is(err, errAlbumSnapshotStale) {
+		t.Fatal("queued deletion did not reject changed album membership", err)
+	}
+	for _, track := range []Track{first, added} {
+		if _, err := a.music.Stat(track.Path); err != nil {
+			t.Fatal("stale album deletion removed a file", err)
+		}
+	}
+	if w := albumDeleteRequest(a, key, token); w.Code != http.StatusPreconditionFailed {
+		t.Fatal("stale deletion was accepted", w.Code, w.Body.String())
 	}
 }

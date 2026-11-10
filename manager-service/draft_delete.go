@@ -29,11 +29,11 @@ func (a *app) deleteBatchRecord(id string) error {
 func (a *app) discardEmptyDraft(id string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if err := a.checkDraftWritable(id); err != nil {
-		return err
-	}
 	b, err := get[Batch](a, "batches", id)
 	if err != nil {
+		return err
+	}
+	if err := a.checkDraftWritable(b); err != nil {
 		return err
 	}
 	if len(b.Files) > 0 || len(b.Children) > 0 || len(b.Imported) > 0 || b.CoverHash != "" {
@@ -50,20 +50,14 @@ func (a *app) discardEmptyDraft(id string) error {
 }
 
 func (a *app) deleteDraftLocked(id string, ids []string) error {
-	if err := a.checkOperation(); err != nil {
-		return err
-	}
 	b, err := get[Batch](a, "batches", id)
 	if err != nil {
 		return err
 	}
-	if b.State != "ready" && b.State != "uploading" {
-		return errors.New("只能删除尚未导入的剩余草稿文件")
-	}
 	if len(b.Children) > 0 {
 		return errors.New("请分别选择分组后的草稿条目")
 	}
-	if err := a.checkDraftWritable(id); err != nil {
+	if err := a.checkDraftWritable(b); err != nil {
 		return err
 	}
 	selected, err := selectedDraftFiles(b, ids)

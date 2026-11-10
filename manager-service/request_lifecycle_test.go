@@ -34,7 +34,7 @@ func TestCancelledInspectionAndHashStopReading(t *testing.T) {
 	if _, err := reader.Seek(0, io.SeekStart); !errors.Is(err, context.Canceled) {
 		t.Fatal("cancelled metadata reader sought", err)
 	}
-	if _, _, err := audioDigest(ctx, f, track.Format); !errors.Is(err, context.Canceled) {
+	if _, _, err := hashTrack(ctx, f, track.Size, 0, track.Size); !errors.Is(err, context.Canceled) {
 		t.Fatal("cancelled audio digest continued", err)
 	}
 	if after, err := f.Seek(0, io.SeekCurrent); err != nil || after != position {

@@ -2,8 +2,10 @@ package audioquality
 
 import (
 	"bytes"
+	"crypto/md5"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 
@@ -29,13 +31,27 @@ func openFLAC(r io.ReadSeeker) (pcmStream, error) {
 	info := streamInfo{int(s.Info.SampleRate), int(s.Info.NChannels), int(s.Info.BitsPerSample), s.Info.NSamples}
 	return pcmStream{info: info, read: func(push func([]int32) error) error {
 		values := make([]int32, info.channels)
-		for {
+		var samples uint64
+		// FLAC's MD5 is an audio integrity check, not an authentication primitive.
+		checksum := md5.New()
+		verify := s.Info.MD5sum != [md5.Size]byte{}
+		bytesPerSample := (info.bits + 7) / 8
+		var pcm []byte
+		// The declared sample count bounds the audio stream. Some files append
+		// non-audio data; parsing that as another frame produces a sync error.
+		// Only a matching nonzero MD5 can confirm this boundary independently.
+		// Otherwise require clean EOF so an understated count cannot silently
+		// discard later audio frames. Unknown lengths also require clean EOF.
+		for info.frames == 0 || !verify || samples < info.frames {
 			frame, err := s.Next()
 			if err == io.EOF {
-				return nil
+				break
 			}
 			if err != nil {
-				return err
+				return fmt.Errorf("FLAC 解码失败（已读取 %d 个样本）：%w", samples, err)
+			}
+			if info.frames != 0 && uint64(frame.BlockSize) > info.frames-samples {
+				return errors.New("FLAC 帧样本数量超过文件头声明")
 			}
 			if frame.BitsPerSample == 0 {
 				frame.BitsPerSample = s.Info.BitsPerSample
@@ -47,7 +63,7 @@ func openFLAC(r io.ReadSeeker) (pcmStream, error) {
 				return errors.New("FLAC 帧参数与文件头不一致")
 			}
 			if err = frame.Parse(); err != nil {
-				return err
+				return fmt.Errorf("FLAC 解码失败（已读取 %d 个样本）：%w", samples, err)
 			}
 			if len(frame.Subframes) != info.channels || int(frame.BitsPerSample) != info.bits || int(frame.SampleRate) != info.rate {
 				return errors.New("FLAC 帧参数与文件头不一致")
@@ -57,15 +73,36 @@ func openFLAC(r io.ReadSeeker) (pcmStream, error) {
 					return errors.New("FLAC 帧样本数量不一致")
 				}
 			}
+			if verify {
+				pcm = pcm[:0]
+			}
 			for i := 0; i < int(frame.BlockSize); i++ {
 				for c := range values {
 					values[c] = frame.Subframes[c].Samples[i]
+					if verify {
+						// RFC 9639: signed little-endian, channel-interleaved PCM,
+						// sign-extended to whole bytes, including 32-bit samples.
+						for b := 0; b < bytesPerSample; b++ {
+							pcm = append(pcm, byte(values[c]>>uint(8*b)))
+						}
+					}
 				}
 				if err := push(values); err != nil {
 					return err
 				}
 			}
+			samples += uint64(frame.BlockSize)
+			if verify {
+				_, _ = checksum.Write(pcm)
+			}
 		}
+		if info.frames != 0 && samples != info.frames {
+			return fmt.Errorf("音频不完整：预期 %d 个样本，读取 %d 个", info.frames, samples)
+		}
+		if verify && !bytes.Equal(checksum.Sum(nil), s.Info.MD5sum[:]) {
+			return errors.New("FLAC 音频 MD5 校验失败：样本内容与文件头不一致")
+		}
+		return nil
 	}}, nil
 }
 

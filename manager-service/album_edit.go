@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -53,15 +56,13 @@ func (c *albumCover) flacPicture() []byte {
 	return b.Bytes()
 }
 
-var albumFields = []string{"album", "album_artist", "genre", "year"}
+var albumFields = [...]string{"album", "album_artist", "genre", "year"}
 
-func albumTagValues(tags Tags) map[string]string {
-	return map[string]string{"album": tags.Album, "album_artist": tags.AlbumArtist, "genre": tags.Genre, "year": tags.Year}
+func albumTagValues(tags Tags) [len(albumFields)]string {
+	return [...]string{tags.Album, tags.AlbumArtist, tags.Genre, tags.Year}
 }
 
-func (a *app) editAlbum(key string, patch map[string]string, cover *albumCover) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (a *app) editAlbumLocked(tracks []Track, patch map[string]string, cover *albumCover) error {
 	for field := range patch {
 		if field != "album" && field != "album_artist" && field != "genre" && field != "year" {
 			return errors.New("专辑编辑包含无效字段")
@@ -72,10 +73,6 @@ func (a *app) editAlbum(key string, patch map[string]string, cover *albumCover) 
 	}
 	ids := []string{}
 	name := "未分类"
-	tracks, err := a.readAlbumTracks(key)
-	if err != nil {
-		return err
-	}
 	for _, track := range tracks {
 		ids = append(ids, track.ID)
 		if track.Tags.Album != "" {
@@ -88,7 +85,74 @@ func (a *app) editAlbum(key string, patch map[string]string, cover *albumCover) 
 	return a.editLocked(ids, patch, cover, "修改专辑 · "+name)
 }
 
+var (
+	errAlbumSnapshotRequired = errors.New("请先读取专辑再提交操作")
+	errAlbumSnapshotStale    = errors.New("专辑内容已变化，请重新打开后提交")
+)
+
+func albumEditToken(key string, tracks []Track) string {
+	type member struct{ ID, Path, Hash string }
+	members := make([]member, len(tracks))
+	for i, track := range tracks {
+		members[i] = member{track.ID, track.Path, track.Hash}
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].ID < members[j].ID })
+	raw, _ := json.Marshal(struct {
+		Key     string
+		Members []member
+	}{key, members})
+	return fmt.Sprintf(`"album-%x"`, sha256.Sum256(raw))
+}
+
+func (a *app) albumSnapshot(key, token string) ([]Track, error) {
+	if token == "" {
+		return nil, errAlbumSnapshotRequired
+	}
+	tracks, err := a.readAlbumTracks(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(tracks) == 0 || albumEditToken(key, tracks) != token {
+		return nil, errAlbumSnapshotStale
+	}
+	return tracks, nil
+}
+
+func (a *app) submitAlbumChange(w http.ResponseWriter, r *http.Request, kind, key string, runLocked func([]Track) error) {
+	token := r.Header.Get("If-Match")
+	if _, err := a.albumSnapshot(key, token); err != nil {
+		switch {
+		case errors.Is(err, errAlbumSnapshotRequired):
+			problem(w, http.StatusPreconditionRequired, err)
+		case errors.Is(err, errAlbumSnapshotStale):
+			problem(w, http.StatusPreconditionFailed, err)
+		default:
+			problem(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	id, err := a.submit(kind, func() error {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		tracks, err := a.albumSnapshot(key, token)
+		if err != nil {
+			return err
+		}
+		return runLocked(tracks)
+	})
+	jobResponse(w, id, err)
+}
+
 func (a *app) albumEditRoutes(m *http.ServeMux) {
+	m.HandleFunc("GET /api/albums/cover", func(w http.ResponseWriter, r *http.Request) {
+		index, err := a.readLibraryIndex()
+		if err != nil {
+			problem(w, 500, err)
+			return
+		}
+		release := index.byAlbum[r.URL.Query().Get("key")]
+		serveArtwork(w, r, a.releaseArtwork(r.Context(), index, release))
+	})
 	m.HandleFunc("POST /api/albums/delete", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Key string `json:"key"`
@@ -100,11 +164,17 @@ func (a *app) albumEditRoutes(m *http.ServeMux) {
 			problem(w, 400, errors.New("专辑标识无效"))
 			return
 		}
-		id, err := a.submit("delete", func() error { return a.deleteAlbum(in.Key) })
-		jobResponse(w, id, err)
+		a.submitAlbumChange(w, r, "delete", in.Key, func(tracks []Track) error {
+			ids := make([]string, 0, len(tracks))
+			for _, track := range tracks {
+				ids = append(ids, track.ID)
+			}
+			return a.deleteTracksLocked(ids)
+		})
 	})
 	m.HandleFunc("GET /api/albums/detail", func(w http.ResponseWriter, r *http.Request) {
-		tracks, err := a.readAlbumTracks(r.URL.Query().Get("key"))
+		key := r.URL.Query().Get("key")
+		tracks, err := a.readAlbumTracks(key)
 		if err != nil {
 			problem(w, 500, err)
 			return
@@ -113,25 +183,31 @@ func (a *app) albumEditRoutes(m *http.ServeMux) {
 			problem(w, 404, errors.New("专辑不存在"))
 			return
 		}
+		token := albumEditToken(key, tracks)
+		w.Header().Set("ETag", token)
+		if r.Header.Get("If-None-Match") == token {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 		tags := map[string]string{}
 		mixed := []string{}
 		first := albumTagValues(tracks[0].Tags)
-		for _, field := range albumFields {
-			tags[field] = first[field]
-			for _, track := range tracks[1:] {
-				values := albumTagValues(track.Tags)
-				if values[field] != tags[field] {
-					tags[field] = ""
-					mixed = append(mixed, field)
-					break
-				}
+		var differs [len(albumFields)]bool
+		editable := tracks[0].Editable
+		for _, track := range tracks[1:] {
+			editable = editable && track.Editable
+			for i, value := range albumTagValues(track.Tags) {
+				differs[i] = differs[i] || value != first[i]
 			}
 		}
-		editable := true
-		for _, track := range tracks {
-			editable = editable && track.Editable
+		for i, field := range albumFields {
+			if differs[i] {
+				mixed = append(mixed, field)
+				first[i] = ""
+			}
+			tags[field] = first[i]
 		}
-		respond(w, map[string]any{"tags": tags, "mixed": mixed, "count": len(tracks), "editable": editable, "cover_id": tracks[0].ID, "cover_version": tracks[0].Hash})
+		respond(w, map[string]any{"tags": tags, "mixed": mixed, "count": len(tracks), "editable": editable, "edit_token": token})
 	})
 	m.HandleFunc("POST /api/albums/edit", func(w http.ResponseWriter, r *http.Request) {
 		form, cover, err := decodeImageForm(w, r, "cover", 1<<20)
@@ -154,24 +230,8 @@ func (a *app) albumEditRoutes(m *http.ServeMux) {
 				patch[field] = strings.TrimSpace(value)
 			}
 		}
-		id, err := a.submit("edit", func() error { return a.editAlbum(key, patch, cover) })
-		jobResponse(w, id, err)
+		a.submitAlbumChange(w, r, "edit", key, func(tracks []Track) error {
+			return a.editAlbumLocked(tracks, patch, cover)
+		})
 	})
-}
-
-func (a *app) deleteAlbum(key string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	ids := []string{}
-	tracks, err := a.readAlbumTracks(key)
-	if err != nil {
-		return err
-	}
-	for _, track := range tracks {
-		ids = append(ids, track.ID)
-	}
-	if len(ids) == 0 {
-		return errors.New("专辑不存在或已变更，请刷新后重试")
-	}
-	return a.deleteTracksLocked(ids)
 }

@@ -16,7 +16,7 @@ import (
 
 func TestSlowDiskDiscoveryDoesNotBlockOfflineState(t *testing.T) {
 	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	c := &diskController{project: t.TempDir(), security: &app{csrf: "token", cookieName: "session"}, standalone: true,
+	c := &diskController{project: t.TempDir(), security: &app{csrf: "token", cookieName: "session"},
 		list:    func(context.Context) ([]library.Drive, error) { close(entered); <-release; return nil, nil },
 		mounted: func(library.Drive) bool { return true }}
 	go func() { c.reconcile(context.Background()); close(finished) }()

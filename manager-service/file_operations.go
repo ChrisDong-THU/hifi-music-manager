@@ -5,13 +5,19 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
 
 func ensureDir(root *os.Root, p string) error {
+	return ensureDirectories(root, p, nil)
+}
+
+func ensureDirectories(root *os.Root, p string, created *[]string) error {
 	if p == "." || p == "" {
 		return nil
 	}
@@ -23,6 +29,9 @@ func ensureDir(root *os.Root, p string) error {
 		if errors.Is(err, os.ErrNotExist) {
 			if err = root.Mkdir(cur, 0700); err != nil {
 				return err
+			}
+			if created != nil {
+				*created = append(*created, cur)
 			}
 			continue
 		}
@@ -86,16 +95,6 @@ func (r operationReader) Read(p []byte) (int, error) {
 	}
 	return r.r.Read(p)
 }
-func (a *app) copyOperationFile(from *os.Root, src string, to *os.Root, dst string) error {
-	if err := a.checkOperation(); err != nil {
-		return err
-	}
-	ctx := a.operationContext()
-	if err := copyFileContext(ctx, from, src, to, dst); err != nil {
-		return err
-	}
-	return a.checkOperation()
-}
 func copyFileContext(ctx context.Context, from *os.Root, src string, to *os.Root, dst string) error {
 	if err := regular(from, src); err != nil {
 		return err
@@ -146,41 +145,62 @@ func component(s string) string {
 		}
 		return r
 	}, s)
-	s = strings.Trim(s, ". ")
-	if len([]rune(s)) > 100 {
-		s = string([]rune(s)[:100])
-	}
-	// Linux filename limits count bytes; keep room for extensions and collisions.
-	for len(s) > 200 {
-		_, size := utf8.DecodeLastRuneInString(s)
-		s = s[:len(s)-size]
-	}
+	s = limitComponent(s)
 	if s == "" {
 		s = "未知"
 	}
 	switch strings.ToUpper(strings.Split(s, ".")[0]) {
 	case "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
 		s = "_" + s
+	case "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³":
+		s = "_" + s
 	}
-	return s
+	// Escaping a device name also consumes space in the component budget.
+	return limitComponent(s)
 }
-func destination(t Track, tags Tags) string {
-	artist := tags.AlbumArtist
-	if artist == "" {
-		artist = tags.Artist
+
+func limitComponent(s string) string {
+	runes := []rune(strings.Trim(s, ". "))
+	if len(runes) > 100 {
+		runes = runes[:100]
 	}
+	return limitNameBytes(string(runes), 200)
+}
+
+func limitNameBytes(s string, maxBytes int) string {
+	if len(s) > maxBytes {
+		for !utf8.RuneStart(s[maxBytes]) {
+			maxBytes--
+		}
+		s = s[:maxBytes]
+	}
+	// Rune or byte truncation can expose a trailing dot/space even if the
+	// original name was normalized. Windows treats those names as aliases.
+	return strings.TrimRight(s, ". ")
+}
+func destinationAlbumDirectory(tags Tags) string {
+	artist := albumCredit(tags)
 	album := tags.Album
 	if album == "" {
 		album = "未分类"
 	}
+	return path.Join(component(artist), component(album))
+}
+
+func destinationFilename(t Track, tags Tags) string {
 	title := tags.Title
 	if title == "" {
 		title = strings.TrimSuffix(filepath.Base(t.Path), filepath.Ext(t.Path))
 	}
-	name := component(title)
+	var prefix string
+	if disc := tagNumber(tags.Disc); disc > 0 {
+		prefix = strconv.Itoa(disc) + "-"
+	}
 	if tags.Track != "" {
 		n, _, _ := strings.Cut(tags.Track, "/")
-		name = component(n) + " - " + name
+		prefix += limitNameBytes(component(n), 32) + " - "
 	}
-	return filepath.ToSlash(filepath.Join(component(artist), component(album), name+strings.ToLower(filepath.Ext(t.Path))))
+	ext := strings.ToLower(filepath.Ext(t.Path))
+	// Leave room in the complete basename for a collision suffix, in bytes.
+	return prefix + limitNameBytes(component(title), 255-len(prefix)-len(ext)-len(" (1000)")) + ext
 }

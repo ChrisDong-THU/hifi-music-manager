@@ -24,6 +24,7 @@ type managerEndpoint struct {
 	cert, key    string
 	publicDomain string
 	lanHostname  string
+	webdav       bool
 }
 
 func managerEndpoints(local managerEndpoint, domain, cert, key string) ([]managerEndpoint, error) {
@@ -46,14 +47,18 @@ func managerEndpoints(local managerEndpoint, domain, cert, key string) ([]manage
 	return []managerEndpoint{local, {listen: managerTunnelListen, cert: cert, key: key, publicDomain: strings.ToLower(domain)}}, nil
 }
 
-func serveManager(ctx context.Context, endpoints []managerEndpoint, gate *app, next http.Handler, auth *managerAuth, health func() managerHealth) error {
+func serveManager(ctx context.Context, endpoints []managerEndpoint, gate *app, next http.Handler, auth *managerAuth, health func() managerHealth, dav *musicDAV) error {
 	type boundEndpoint struct {
 		server   *http.Server
 		listener net.Listener
 	}
 	var bound []boundEndpoint
 	for _, endpoint := range endpoints {
-		handler := gate.protectManager(next, auth, health, endpoint.publicDomain, endpoint.lanHostname)
+		var share *musicDAV
+		if endpoint.webdav {
+			share = dav
+		}
+		handler := gate.protectManagerDAV(next, auth, health, endpoint.publicDomain, endpoint.lanHostname, share)
 		server := &http.Server{Addr: endpoint.listen, Handler: requestBodyTimeout(handler, 2*time.Minute),
 			ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 		if endpoint.cert != "" {

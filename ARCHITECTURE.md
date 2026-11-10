@@ -1,18 +1,16 @@
 # 系统架构
 
-系统面向一块活动 USB 音乐盘。管理 Web 编辑资源，音乐服务读取同一份资源；两者维护独立索引，通过单向通知刷新播放库。
+系统面向一块活动 USB 音乐盘。管理 Web 编辑资源，WebDAV 通过同一个盘上下文读取正式音频。
 
 ```mermaid
 flowchart LR
     Browser[浏览器] --> Manager[管理服务 / 内嵌前端]
-    Manager --> Resources[音乐、标签、封面、歌手资料]
+    Player[WebDAV 播放器] --> DAV[只读 WebDAV]
+    Manager --> Disk[活动数据盘控制器]
+    DAV --> Disk
+    Disk --> Resources[正式音乐]
+    Manager --> Profiles[歌手资料]
     Manager --> DB[管理数据库与草稿]
-    Manager --> Sync[持久化刷新通知]
-    Sync --> Minim[MinimServer]
-    Resources --> Minim
-    Player[UPnP 客户端] --> Music[音乐服务 / 展示适配]
-    Music --> Minim
-    Resources --> Music
 ```
 
 ## 职责边界
@@ -23,9 +21,9 @@ flowchart LR
 | 草稿工作区 | 接收原件、读取与检测、保存编辑意图、选择歌曲、导入和删除 |
 | 正式曲库 | 扫描、编辑、查询音频和公共歌手资料 |
 | 操作执行器 | 串行任务、文件互斥、逐项提交、操作摘要和前向清理 |
-| 播放同步 | 资源提交后异步通知 MinimServer，失败重试，不回滚已保存音乐 |
+| WebDAV | 用活动盘的正式音乐目录提供只读列表和原文件 Range 播放 |
 
-共享资源格式由 `shared-library/` 唯一实现。音乐服务不打开管理数据库，管理服务不读取 MinimServer 缓存。
+共享资源格式由 `shared-library/` 唯一实现。WebDAV 读取正式文件，无需独立索引或后台刷新。
 
 ## 数据权威与身份
 
@@ -55,8 +53,8 @@ flowchart LR
 
 前端与 API 嵌入同一程序交付，服务更新后应刷新旧页面。运行时不需要 Node.js、Go 或数据库服务器。
 
-管理端仅允许回环地址或显式配置的 RFC1918 网段，写请求校验来源、CSRF 和曲库上下文。音乐服务提供只读 UPnP 展示，保留原生媒体资源；订阅回调限同网段订阅者自身地址。
+局域网入口只绑定可信网段的指定 IP，管理写请求校验来源、CSRF 和曲库上下文。WebDAV 使用独立的访问密码，仅允许 `OPTIONS`、`PROPFIND`、`GET` 和 `HEAD`，从活动盘的目录句柄读取正式音频。切盘会关闭旧盘请求并使管理页面建立新会话。
 
-启用公网域名时，ChmlFrp 将管理流量交给独立的回环 HTTPS 监听器。BubbleUPnP 中继使用另一个公网域名，接收 HTTPS 浏览和 HTTP 媒体流请求；中继以 Nano 上的专用源地址连接 BubbleUPnP Server，保留其远程认证流程。局域网 UPnP 发现和媒体服务使用各自的局域网监听地址。
+启用公网域名时，ChmlFrp 将流量交给独立的回环 HTTPS 监听器。显式开启公网 WebDAV 后，播放器可通过同一域名的 `/webdav/` 连接。
 
-Linux 启动器按可信网段识别当前地址后替换为 Go 进程。MinimServer 运行器持有目录句柄并监督进程组，丢盘后停止原生实例。真实挂载、媒体播放与第三方客户端行为仍须在目标设备验收。
+Linux 启动器按可信网段识别当前地址后启动 Go 进程。管理和 WebDAV 共用进程及挂载校验，盘离线时管理页面仍可打开并选盘。

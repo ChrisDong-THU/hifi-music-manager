@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -25,6 +27,7 @@ type draftView struct {
 	HasSavedTags bool                     `json:"has_saved_tags"`
 	Previewed    bool                     `json:"previewed"`
 	CoverHash    string                   `json:"cover_hash,omitempty"`
+	AlbumMatch   string                   `json:"album_match,omitempty"`
 	ReadState    string                   `json:"read_state,omitempty"`
 	ReadError    string                   `json:"read_error,omitempty"`
 	QualityState string                   `json:"quality_state,omitempty"`
@@ -82,7 +85,19 @@ func visibleDraft(b Batch) bool {
 	return b.State == "uploading" || b.State == "ready" || b.State == "importing"
 }
 
-func projectDraft(b Batch, detail bool) draftView {
+func draftDuplicates(files []Track, known contentIndex) []string {
+	var duplicates []string
+	seen := contentIndex{}
+	for position, file := range files {
+		if known.find(file) >= 0 || seen.find(file) >= 0 {
+			duplicates = append(duplicates, file.ID)
+		}
+		seen.add(file, position)
+	}
+	return duplicates
+}
+
+func projectDraft(b Batch, known contentIndex, detail bool) draftView {
 	files := append([]Track{}, b.Files...)
 	saved := savedDraftTags(b)
 	for i := range saved {
@@ -91,8 +106,11 @@ func projectDraft(b Batch, detail bool) draftView {
 	view := draftView{ID: b.ID, Name: b.Name, Created: b.Created, State: b.State, Message: b.Message, ParentID: b.ParentID,
 		Files: files, HasSavedTags: saved != nil, Previewed: b.Previewed, CoverHash: b.CoverHash,
 		ReadState: b.ReadState, ReadError: b.ReadError, QualityState: b.QualityState, QualityError: b.QualityError,
-		Quality: b.Quality, Duplicates: b.Duplicates}
+		Quality: b.Quality, Duplicates: draftDuplicates(b.Files, known)}
 	view.EditToken = draftEditToken(b)
+	if detail {
+		view.AlbumMatch = b.AlbumMatch
+	}
 	if !detail {
 		for i := range view.Files {
 			view.Files[i].Tags.Lyrics = ""
@@ -113,14 +131,16 @@ func draftEditToken(b Batch) string {
 		files = append(files, file{track.ID, track.Hash, track.Tags})
 	}
 	raw, _ := json.Marshal(struct {
-		Files []file
-		Saved []Tags
-		Cover string
-	}{files, savedDraftTags(b), b.CoverHash})
+		Files      []file
+		Saved      []Tags
+		Cover      string
+		AlbumMatch string
+	}{files, savedDraftTags(b), b.CoverHash, b.AlbumMatch})
 	return fmt.Sprintf(`"%x"`, sha256.Sum256(raw))
 }
 
 func (a *app) draftReadRoutes(m *http.ServeMux) {
+	m.HandleFunc("GET /api/albums/matches", a.albumMatches)
 	m.HandleFunc("GET /api/drafts", func(w http.ResponseWriter, r *http.Request) {
 		var result draftList
 		var tag string
@@ -139,11 +159,18 @@ func (a *app) draftReadRoutes(m *http.ServeMux) {
 				return err
 			}
 			result.Drafts = []draftView{}
-			for _, b := range sortedBatches(batches, index.hashes) {
+			for _, b := range batches {
 				if visibleDraft(b) {
-					result.Drafts = append(result.Drafts, projectDraft(b, false))
+					result.Drafts = append(result.Drafts, projectDraft(b, index.hashes, false))
 				}
 			}
+			sort.Slice(result.Drafts, func(i, j int) bool {
+				left, right := result.Drafts[i], result.Drafts[j]
+				if left.Created != right.Created {
+					return left.Created > right.Created
+				}
+				return left.ID < right.ID
+			})
 			return nil
 		})
 		if err != nil {
@@ -158,7 +185,16 @@ func (a *app) draftReadRoutes(m *http.ServeMux) {
 		respond(w, result)
 	})
 	m.HandleFunc("GET /api/drafts/{id}", func(w http.ResponseWriter, r *http.Request) {
-		b, err := get[Batch](a, "batches", r.PathValue("id"))
+		var b Batch
+		var index *libraryIndex
+		err := a.db.View(func(tx *bolt.Tx) error {
+			var err error
+			b, err = getTx[Batch](tx, "batches", r.PathValue("id"))
+			if err == nil && visibleDraft(b) {
+				index, err = a.libraryIndexTx(tx)
+			}
+			return err
+		})
 		if errors.Is(err, os.ErrNotExist) || (err == nil && !visibleDraft(b)) {
 			problem(w, 404, errors.New("草稿不存在或已完成"))
 			return
@@ -167,7 +203,37 @@ func (a *app) draftReadRoutes(m *http.ServeMux) {
 			problem(w, 500, err)
 			return
 		}
-		view := projectDraft(b, true)
+		view := projectDraft(b, index.hashes, true)
+		if view.AlbumMatch != "" && view.AlbumMatch != "new" && len(view.Files) > 0 {
+			tags := view.Files[0].Tags
+			if match, _ := chooseAlbum(index.byIdentity[albumIdentity(tags.Album, albumCredit(tags))], view.AlbumMatch, tags.Year); match != nil {
+				view.AlbumMatch = match.matchKey
+			}
+		}
 		respond(w, view)
 	})
+}
+
+func (a *app) albumMatches(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	title, artist, year := query.Get("title"), query.Get("artist"), query.Get("year")
+	if len(title) > 4096 || len(artist) > 4096 || len(year) > 16 || strings.ContainsRune(title+artist, 0) {
+		problem(w, 400, errors.New("专辑匹配条件无效"))
+		return
+	}
+	matches := []albumPlacement{}
+	var requiresChoice bool
+	if strings.TrimSpace(title) != "" && strings.TrimSpace(artist) != "" {
+		index, err := a.readLibraryIndex()
+		if err != nil {
+			problem(w, 500, err)
+			return
+		}
+		releases := index.byIdentity[albumIdentity(title, artist)]
+		for _, release := range releases {
+			matches = append(matches, release.placement())
+		}
+		requiresChoice = requiresAlbumChoice(releases, year)
+	}
+	respond(w, map[string]any{"matches": matches, "requires_choice": requiresChoice})
 }

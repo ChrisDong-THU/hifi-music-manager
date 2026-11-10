@@ -7,7 +7,13 @@ import {
   Card,
   CardActions,
   CardContent,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
+  Stack,
+  TextField,
 } from "@mui/material";
 import {
   AudioLines,
@@ -27,6 +33,59 @@ import { IconAction, PageTitle } from "./components";
 import { DataDiskSettings } from "./DataDiskSettings";
 import { useScanStats } from "./useScanStats";
 import { useAnimatedStats } from "./useAnimatedStats";
+import { jsonResponse } from "./http-client";
+
+type WebDAVSettings =
+  | { enabled: false }
+  | { enabled: true; url: string; username: string; password: string };
+
+function WebDAVAccess() {
+  const [settings, setSettings] = useState<WebDAVSettings | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  async function showSettings() {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/system/webdav", {
+        cache: "no-store",
+        signal: AbortSignal.timeout(10_000),
+      });
+      setSettings(await jsonResponse<WebDAVSettings>(response));
+    } catch {
+      setError("暂时无法读取 WebDAV 连接信息，请重试。");
+    } finally {
+      setLoading(false);
+    }
+  }
+  function close() {
+    setSettings(null);
+    setError("");
+  }
+  return (
+    <>
+      <Button disabled={loading} onClick={() => void showSettings()}>
+        WebDAV 连接
+      </Button>
+      <Dialog open={settings !== null || Boolean(error)} onClose={close} fullWidth>
+        <DialogTitle>WebDAV 连接</DialogTitle>
+        <DialogContent>
+          {error ? <Alert severity="error">{error}</Alert> : settings?.enabled ? (
+            <Stack spacing={2} sx={{ pt: 1 }}>
+              <Alert severity="info">在支持 WebDAV 的播放器中填写以下信息，即可浏览和播放当前数据盘的正式曲库。</Alert>
+              <TextField label="服务器地址" value={settings.url} slotProps={{ input: { readOnly: true } }} />
+              <TextField label="用户名" value={settings.username} slotProps={{ input: { readOnly: true } }} />
+              <TextField label="访问密码" value={settings.password} slotProps={{ input: { readOnly: true } }} />
+            </Stack>
+          ) : (
+            <Alert severity="info">当前入口未启用 WebDAV，请通过局域网管理地址获取连接信息。</Alert>
+          )}
+        </DialogContent>
+        <DialogActions><Button onClick={close}>关闭</Button></DialogActions>
+      </Dialog>
+    </>
+  );
+}
 
 // Only the number tiles render on animation frames; page actions and history
 // remain independent of the counter's display refresh rate.
@@ -139,6 +198,7 @@ export function HomePage() {
           </CardContent>
           <Divider sx={{ mx: 1 }} />
           <CardActions sx={{ pt: 2, px: 1, justifyContent: "flex-end" }}>
+            <WebDAVAccess />
             <Button
               variant="contained"
               color="secondary"

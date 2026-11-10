@@ -12,14 +12,13 @@ import (
 )
 
 const (
-	DataDirectory        = "hifi-music-nano"
-	MusicDirectory       = "music"
-	ArtistDirectory      = "resources/artists"
-	ManagerDirectory     = "manager"
-	DatabaseFile         = "manager.db"
-	UploadsDirectory     = "uploads"
-	MinimServerDirectory = "minimserver"
-	IdentityFile         = "library-id"
+	DataDirectory    = "hifi-music-nano"
+	MusicDirectory   = "music"
+	ArtistDirectory  = "resources/artists"
+	ManagerDirectory = "manager"
+	DatabaseFile     = "manager.db"
+	UploadsDirectory = "uploads"
+	IdentityFile     = "library-id"
 )
 
 type Drive struct {
@@ -94,7 +93,7 @@ func emptyProject(root *os.Root) error {
 	return nil
 }
 
-var layoutDirectories = []string{MusicDirectory, ArtistDirectory, ManagerDirectory, ManagerDirectory + "/" + UploadsDirectory, MinimServerDirectory}
+var layoutDirectories = []string{MusicDirectory, ArtistDirectory, ManagerDirectory, ManagerDirectory + "/" + UploadsDirectory}
 
 func InspectDisk(d Drive) DiskInfo {
 	info := DiskInfo{Drive: d, DataRoot: DataPath(d.Root)}

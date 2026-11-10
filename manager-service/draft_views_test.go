@@ -106,7 +106,7 @@ func TestDraftSavePreconditionProtectsUserEditsWithoutFollowingTaskProgress(t *t
 		t.Fatal(w.Code, w.Body.String())
 	}
 	current, err := get[Batch](a, "batches", b.ID)
-	if err != nil || projectDraft(current, true).Files[0].Tags.Title != "First editor" {
+	if err != nil || projectDraft(current, nil, true).Files[0].Tags.Title != "First editor" {
 		t.Fatal("stale form overwrote saved content", err)
 	}
 }

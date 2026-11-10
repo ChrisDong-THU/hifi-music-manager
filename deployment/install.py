@@ -1,5 +1,6 @@
 """Target-side installer. Python 3.6+, standard library, no destructive reset path."""
 import argparse
+import base64
 import hashlib
 import http.client
 import ipaddress
@@ -8,29 +9,21 @@ import os
 import pathlib
 import platform
 import re
-import shutil
 import socket
 import ssl
 import subprocess
-import sys
 import tempfile
 import time
 import urllib.request
 import urllib.error
-import uuid
 import zipfile
 import xml.etree.ElementTree as ET
-import xmlrpc.client
 
 
-BINARIES = {"hifi-manager": "manager-service/hifi-manager",
-            "hifi-music-service": "music-service/hifi-music-service"}
+BINARIES = {"hifi-manager": "manager-service/hifi-manager"}
 PRIVATE = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
 DNS_LABEL = r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?'
 MANAGER_TUNNEL_PORT = 18787
-BUBBLE_HTTPS_TUNNEL_PORT = 18443
-BUBBLE_WAN_PEER = '192.0.2.1'
-BUBBLE_RELAY_UNIT = 'hifi-bubble-relay.service'
 LAN_REBIND = 'hifi-lan-rebind.service'
 
 
@@ -68,148 +61,6 @@ def safe_path(value):
     return path
 
 
-def discover_backend(ip):
-    """Find this device's initialized MinimServer; never copy another server's UDN."""
-    from urllib.parse import urlsplit, urlunsplit
-    request = ('M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\n'
-               'MX: 1\r\nST: urn:schemas-upnp-org:device:MediaServer:1\r\n\r\n').encode()
-    locations = set()
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.bind((ip, 0))
-        sock.settimeout(0.5)
-        sock.sendto(request, ('239.255.255.250', 1900))
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            try:
-                response, peer = sock.recvfrom(8192)
-            except socket.timeout:
-                continue
-            if peer[0] != ip:
-                continue
-            for line in response.decode('utf-8', errors='replace').splitlines():
-                key, separator, value = line.partition(':')
-                if separator and key.lower() == 'location':
-                    url = urlsplit(value.strip())
-                    if url.scheme == 'http' and url.hostname == ip and url.port in (9790, 9791) and not url.username:
-                        locations.add(urlunsplit(('http', '127.0.0.1:' + str(url.port), url.path, url.query, '')))
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    candidates = []
-    for url in sorted(locations):
-        try:
-            with opener.open(url, timeout=3) as response:
-                document = ET.fromstring(response.read(1024 * 1024))
-            if any('minimserver' in (node.text or '').lower() for node in document.iter()
-                   if node.tag.endswith(('manufacturer', 'modelName'))):
-                candidates.append(url)
-        except (OSError, ET.ParseError):
-            continue
-    if len(candidates) != 1:
-        raise ValueError('Cannot identify exactly one local MinimServer; initialize it first or set backend_description explicitly')
-    return candidates[0]
-
-
-def wait_backend(ip, timeout=45):
-    """Native service activation returns before Java has advertised its device."""
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            return discover_backend(ip)
-        except ValueError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.5)
-
-
-def resolve(profile):
-    p = dict(profile)
-    allowed = {'root', 'volume', 'lan_ip', 'lan_cidr', 'web_port', 'browse_port', 'name',
-               'manage_minim', 'manage_bubble', 'backend_description', 'browse_udn', 'java_home',
-               'manager_public_domain', 'bubble_public_domain', 'manager_lan_hostname'}
-    if set(p) - allowed:
-        raise ValueError('Unknown device settings: ' + ', '.join(sorted(set(p) - allowed)))
-    p["root"] = str(safe_path(p.get("root", "~/hifi")))
-    root = pathlib.Path(p['root'])
-    selected = active_library(root)
-    if selected:
-        # volume is an initial provisioning hint. Desktop automount names can
-        # change; a verified supervisor selection is authoritative thereafter.
-        p['volume'] = str(pathlib.Path(selected).parents[1])
-    if not p.get('volume'):
-        selection = root / 'logs/library-state.json'
-        current = json.loads(selection.read_text()) if selection.exists() else {}
-        if not current.get('selected'):
-            raise ValueError('Connect a music disk first, or set volume for initial installation')
-        p['volume'] = current.get('mount') or str(pathlib.Path(current['selected']).parent)
-    p['volume'] = str(safe_path(p['volume']))
-    if "lan_ip" not in p:
-        connection = os.environ.get('SSH_CONNECTION', '').split()
-        if len(connection) != 4:
-            raise ValueError("Set lan_ip when running outside SSH")
-        p['lan_ip'] = connection[2]
-    ip = ipaddress.ip_address(p['lan_ip'])
-    if ip.version != 4 or not any(ip in n for n in PRIVATE):
-        raise ValueError("lan_ip must be a literal private IPv4 address")
-    addresses = json.loads(command('ip', '-j', '-4', 'address', 'show'))
-    prefix = next((a['prefixlen'] for interface in addresses for a in interface.get('addr_info', [])
-                   if a.get('local') == str(ip)), None)
-    if prefix is None:
-        raise ValueError("lan_ip is not assigned to this device")
-    p['lan_cidr'] = str(private_network(p.get('lan_cidr', str(ip) + '/' + str(prefix))))
-    if ip not in ipaddress.ip_network(p['lan_cidr']):
-        raise ValueError("lan_ip is outside lan_cidr")
-    for key, default in [('web_port', 8787), ('browse_port', 9792)]:
-        p[key] = p.get(key, default)
-        if type(p[key]) is not int or not 1024 <= p[key] <= 65535:
-            raise ValueError(key + ' must be an unprivileged TCP port')
-    if p['web_port'] == p['browse_port']:
-        raise ValueError('Web and music ports must differ')
-    for key in ('manager_public_domain', 'bubble_public_domain'):
-        if key in p:
-            p[key] = public_domain(p[key])
-    if p.get('bubble_public_domain') and p['bubble_public_domain'] == p.get('manager_public_domain'):
-        raise ValueError('Use separate domains for the public manager and BubbleUPnP')
-    p.setdefault('name', 'hifi-music')
-    if not isinstance(p['name'], str) or not p['name'].strip() or len(p['name']) > 100:
-        raise ValueError('Invalid device name')
-    p.setdefault('manage_minim', True)
-    p.setdefault('manage_bubble', False)
-    for key in ('manage_minim', 'manage_bubble'):
-        if type(p[key]) is not bool:
-            raise ValueError(key + ' must be a boolean')
-    if p.get('bubble_public_domain') and not p['manage_bubble']:
-        raise ValueError('bubble_public_domain requires manage_bubble')
-    existing_path = root / 'music-service/config.json'
-    existing = json.loads(existing_path.read_text()) if existing_path.exists() else {}
-    for key in ('browse_udn', 'backend_description'):
-        if key in existing and key in p and p[key] != existing[key]:
-            raise ValueError('Refusing to change existing playback identity: ' + key)
-        if key in existing:
-            p[key] = existing[key]
-    if 'backend_description' not in p:
-        p['backend_description'] = discover_backend(str(ip))
-    from urllib.parse import urlsplit
-    backend = urlsplit(p['backend_description'])
-    if backend.scheme != 'http' or backend.hostname != '127.0.0.1' or backend.port not in (9790, 9791) or backend.username or backend.password or backend.fragment:
-        raise ValueError('backend_description must be a loopback MinimServer URL on port 9790/9791')
-    if 'browse_udn' in p:
-        if 'uuid:' + str(uuid.UUID(p['browse_udn'][5:])) != p['browse_udn']:
-            raise ValueError('Invalid browse_udn')
-    if p.get('java_home'):
-        p['java_home'] = str(safe_path(p['java_home']))
-    state = root / 'deployment/state.json'
-    if state.exists():
-        previous = json.loads(state.read_text())
-        if previous['root'] != p['root']:
-            raise ValueError('Deployment root changed; refusing to relocate existing installation')
-        if 'manager_lan_hostname' in previous:
-            p.setdefault('manager_lan_hostname', previous['manager_lan_hostname'])
-    if 'manager_lan_hostname' in p:
-        p['manager_lan_hostname'] = public_domain(p['manager_lan_hostname'])
-        if not p['manager_lan_hostname'].endswith('.local'):
-            raise ValueError('manager_lan_hostname must be a .local name')
-    return p
-
-
 def mount_identity(volume):
     """Return the live generation, or None while the configured disk is absent."""
     for line in pathlib.Path('/proc/self/mountinfo').read_text().splitlines():
@@ -221,35 +72,30 @@ def mount_identity(volume):
     return None
 
 
-def manager_busy(state):
-    return bool(state.get('active_mutations', 0) or any(
-        job.get('state') in ('queued', 'running') and job.get('kind') != 'sync'
-        for job in state.get('jobs', [])))
-
-
 class ManagerRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
         return None
 
 
-class ManagerLANHTTPSHandler(urllib.request.HTTPSHandler):
-    def __init__(self, address, context):
+class BoundHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, address, context, port=None):
         super().__init__(context=context)
         self.address = address
+        self.port = port
 
     def https_open(self, request):
-        address = self.address
+        address, port = self.address, self.port
 
         class LANConnection(http.client.HTTPSConnection):
             def connect(self):
-                tcp = socket.create_connection((address, self.port), self.timeout)
+                tcp = socket.create_connection((address, port or self.port), self.timeout)
                 try:
                     self.sock = self._context.wrap_socket(tcp, server_hostname=self.host)
                 except BaseException:
                     tcp.close()
                     raise
 
-        # Dial the verified interface address while retaining the .local identity in TLS and HTTP.
+        # Keep the hostname for TLS and HTTP while dialing the known local address.
         return self.do_open(LANConnection, request, context=self._context)
 
 
@@ -267,67 +113,9 @@ def manager_endpoint(p, validate_tls=False):
             server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             server_context.load_cert_chain(str(cert), str(key), password='')
         context = ssl.create_default_context(cafile=str(ca) if ca.is_file() else None)
-        handlers.append(ManagerLANHTTPSHandler(p['lan_ip'], context) if hostname else urllib.request.HTTPSHandler(context=context))
+        handlers.append(BoundHTTPSHandler(p['lan_ip'], context) if hostname else urllib.request.HTTPSHandler(context=context))
         scheme = 'https'
     return scheme + '://' + (hostname or p['lan_ip']) + ':' + str(p['web_port']), urllib.request.build_opener(*handlers)
-
-
-def check_public_tls_files(root, service):
-    config = root / 'config'
-    cert, key = (config / (service + '-public-tls-' + name + '.pem') for name in ('cert', 'key'))
-    if not cert.is_file() or not key.is_file() or key.stat().st_mode & 0o077:
-        raise ValueError('Provide {} and a private {} (chmod 600)'.format(cert.name, key.name))
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(str(cert), str(key), password='')
-
-
-def check_public_https(domain, port, path, accept, timeout=30, body=None):
-    context = ssl.create_default_context()
-    address = ('127.0.0.1', port)
-    method = 'GET' if body is None else 'POST'
-    headers = {'Host': domain}
-    if body is not None:
-        headers['Content-Type'] = 'text/xml'
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            with socket.create_connection(address, timeout=3) as tcp:
-                with context.wrap_socket(tcp, server_hostname=domain) as tls:
-                    connection = http.client.HTTPConnection(*address, timeout=3)
-                    connection.sock = tls
-                    connection.request(method, path, body=body, headers=headers)
-                    with connection.getresponse() as response:
-                        if accept(response):
-                            return
-        except ssl.SSLError:
-            raise
-        except OSError:
-            if time.monotonic() >= deadline:
-                raise
-        if time.monotonic() >= deadline:
-            raise RuntimeError('Public HTTPS origin failed local readiness check: ' + domain + path)
-        time.sleep(0.5)
-
-
-def bubble_local_url(p):
-    port = 80 if p.get('bubble_public_domain') else 58050
-    return 'http://' + p['lan_ip'] + ':' + str(port) + '/'
-
-
-def check_bubble_account(root):
-    path = root / 'bubbleupnp/configuration.xml'
-    try:
-        settings = ET.parse(str(path)).getroot()
-    except (OSError, ET.ParseError) as error:
-        raise ValueError('Complete local BubbleUPnP setup before enabling its public relay') from error
-    password = settings.findtext('password', '').strip()
-    if (settings.findtext('firstRun', '').strip().lower() != 'false' or
-            not settings.findtext('login', '').strip() or not password or password == 'OBF:1u2a1toa1w8v1tok1u30'):
-        raise ValueError('Set a non-default BubbleUPnP account on the LAN first')
-    if (settings.findtext('allowWANConnections', '').strip().lower() != 'true' or
-            settings.findtext('allowWANConfigurationUI', 'false').strip().lower() != 'false' or
-            settings.findtext('webContextPath', '/').strip() != '/'):
-        raise ValueError('BubbleUPnP requires remote access enabled, WAN configuration disabled, and webContextPath /')
 
 
 def manager_health(body):
@@ -338,179 +126,12 @@ def manager_health(body):
     return state
 
 
-def manager_port_busy(url, opener):
-    def read_busy(endpoint, client):
-        try:
-            with client.open(endpoint + '/healthz', timeout=3) as response:
-                return manager_health(response.read(4096))['busy']
-        except urllib.error.HTTPError as error:
-            if error.code != 404:
-                raise
-            error.close()
-        with client.open(endpoint + '/api/state', timeout=3) as response:
-            state = json.loads(response.read(2 * 1024 * 1024).decode())
-        if not isinstance(state, dict) or 'music_path' not in state or 'stats' not in state:
-            raise ValueError('Port is occupied by another service: ' + endpoint)
-        return manager_busy(state)
-
-    try:
-        return read_busy(url, opener)
-    except urllib.error.URLError as error:
-        # The process already on the port may still speak HTTP during a TLS upgrade.
-        # Certificate errors must never trigger this read-only compatibility probe.
-        if (not url.startswith('https://') or not isinstance(error.reason, ssl.SSLError)
-                or getattr(error.reason, 'reason', None) != 'WRONG_VERSION_NUMBER'):
-            raise
-    plain_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), ManagerRedirectHandler())
-    return read_busy(url.replace('https://', 'http://', 1), plain_opener)
-
-
-def preflight(p):
-    if platform.system() != 'Linux' or platform.machine() not in ('aarch64', 'x86_64'):
-        raise ValueError('Target must be Linux ARM64 or x86_64')
-    if os.getuid() == 0:
-        raise ValueError('Run as the normal service owner, not root')
-    root, volume = pathlib.Path(p['root']), pathlib.Path(p['volume'])
-    manager_url, manager_opener = manager_endpoint(p, validate_tls=True)
-    if p.get('manager_public_domain'):
-        if not manager_url.startswith('https://'):
-            raise ValueError('Provide the LAN manager HTTPS certificate and key before enabling the public manager')
-        check_public_tls_files(root, 'manager')
-    if p.get('bubble_public_domain'):
-        check_public_tls_files(root, 'bubble')
-        check_bubble_account(root)
-        if not (os.access('/usr/bin/authbind', os.X_OK) and os.access('/etc/authbind/byport/80', os.X_OK)):
-            raise ValueError('Enable port 80 for the service owner using authbind; see deployment/CHMLFRP.md')
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.bind((BUBBLE_WAN_PEER, 0))
-        except OSError as error:
-            raise ValueError('Set up the local BubbleUPnP WAN peer; see deployment/CHMLFRP.md') from error
-    generation = mount_identity(str(volume))
-    inventory = json.loads(command('lsblk', '-J', '-p', '-o', 'NAME,TYPE,TRAN,MOUNTPOINT'))
-    def usb(nodes, bus=''):
-        return any((n.get('tran') or bus) == 'usb' and n.get('mountpoint') == str(volume)
-                   or usb(n.get('children', []), n.get('tran') or bus) for n in nodes)
-    if generation is not None and not usb(inventory['blockdevices']):
-        raise ValueError('Music volume must be a mounted USB device')
-    for path in (root, volume, root / 'music-service', root / 'manager-service',
-                 volume / 'hifi-music-nano', volume / 'hifi-music-nano/music', volume / 'hifi-music-nano/manager'):
-        if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
-            raise ValueError('Deployment/storage directories cannot contain symlinks: ' + str(path))
-    music_link = root / 'music'
-    if music_link.exists() or music_link.is_symlink():
-        if not music_link.is_symlink() or music_link.resolve() != volume / 'hifi-music-nano/music':
-            raise ValueError('Existing music entry points to a different library')
-    systemctl('show-environment')
-    if command('loginctl', 'show-user', str(os.getuid()), '-p', 'Linger', '--value') != 'yes':
-        raise ValueError('Administrator prerequisite: sudo loginctl enable-linger ' + command('id', '-un'))
-    if not (root / 'minimserver/bin/startd').is_file():
-        raise ValueError('Install and initialize official MinimServer first; see deployment/README.md')
-    minim_profile = root / 'minimserver/data/default.profile'
-    settings = dict(line.split('=', 1) for line in minim_profile.read_text().splitlines()
-                    if '=' in line and not line.lstrip().startswith('#')) if minim_profile.exists() else {}
-    content = next((value.strip() for key, value in settings.items() if key.strip() == 'contentDir'), '')
-    if content not in (str(root / 'music'), str(volume/'hifi-music-nano/music')):
-        raise ValueError('Initialize MinimServer contentDir to ' + str(root / 'music'))
-    units = pathlib.Path.home() / '.config/systemd/user'
-    if not p['manage_minim'] and not (units / 'hifi-minimserver.service').is_file():
-        raise ValueError('External hifi-minimserver.service is missing')
-    if p['manage_bubble'] and not (root / 'bubbleupnp/launch.sh').is_file():
-        raise ValueError('Install official BubbleUPnP distribution first')
-    java = pathlib.Path(p['java_home']) / 'bin/java' if p.get('java_home') else shutil.which('java')
-    if (p['manage_minim'] or p['manage_bubble']) and (not java or not os.access(str(java), os.X_OK)):
-        raise ValueError('A Java runtime is required; set java_home or install Java on PATH')
-    base = root if root.exists() else root.parent
-    if not os.access(str(base), os.W_OK) or generation is not None and not os.access(str(volume), os.W_OK):
-        raise ValueError('Service owner cannot write deployment or music volume')
-    if shutil.disk_usage(str(base)).free < 150 * 1024 * 1024:
-        raise ValueError('Need at least 150 MiB free for staging and rollback')
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    for port, path, expected in ((p['web_port'], '/healthz', b''),
-                                 (p['browse_port'], '/device.xml', p.get('browse_udn', 'new-device').encode())):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind((p['lan_ip'], port))
-                continue
-            except OSError:
-                pass
-        try:
-            if path == '/healthz':
-                if manager_port_busy(manager_url, manager_opener):
-                    raise ValueError('Manager has uploads or active file jobs; retry deployment after they finish')
-            else:
-                with opener.open('http://' + p['lan_ip'] + ':' + str(port) + path, timeout=3) as response:
-                    body = response.read(2 * 1024 * 1024)
-                if expected not in body:
-                    raise ValueError('Port is occupied by another service: ' + str(port))
-        except OSError as error:
-            raise ValueError('Port {} is occupied but the existing service is not healthy: {}'.format(port, error)) from error
-    return generation
-
-
 def unit(description, directory, executable, args='', memory='128MiB', dependencies=''):
     return ('[Unit]\nDescription=' + description + '\nAfter=network-online.target\n' + dependencies +
             '\n[Service]\nType=simple\nWorkingDirectory=' + str(directory) + '\nExecStart=' + str(executable) +
             (' ' + args if args else '') + '\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=90\n'
             'UMask=0077\nNoNewPrivileges=true\nEnvironment=GOMEMLIMIT=' + memory +
             '\nEnvironment=GOMAXPROCS=2\n\n[Install]\nWantedBy=default.target\n')
-
-
-def render(p):
-    root, volume = pathlib.Path(p['root']), pathlib.Path(p['volume'])
-    units = pathlib.Path.home() / '.config/systemd/user'
-    config = dict(browse_udn=p['browse_udn'], browse_listen=p['lan_ip'] + ':' + str(p['browse_port']),
-                  backend_description=p['backend_description'], lan_cidr=p['lan_cidr'], name=p['name'])
-    launcher = root / 'deployment/launch-service.py'
-    files = {root / 'music-service/config.json': (json.dumps(config, indent=2) + '\n', 0o600),
-             units / 'hifi-music.service': (unit('HiFi music USB supervision and UPnP presentation', root / 'music-service',
-                 '/usr/bin/python3', str(launcher) + ' music ' + str(root) + ' ' + str(p['web_port'])), 0o644),
-             launcher: (launcher_source(), 0o600)}
-    files[units / LAN_REBIND] = (unit('Refresh HiFi listeners after a LAN address change', root,
-                                     '/usr/bin/python3', str(launcher) + ' watch ' + str(root)), 0o644)
-    args = str(launcher) + ' manager ' + str(root) + ' ' + str(p['web_port'])
-    if p.get('manager_public_domain'):
-        args += ' ' + public_domain(p['manager_public_domain'])
-    if p.get('manager_lan_hostname'):
-        args += ' --lan-hostname ' + public_domain(p['manager_lan_hostname'])
-    files[units / 'hifi-manager.service'] = (unit('HiFi Web music manager', root / 'manager-service',
-        '/usr/bin/python3', args, '256MiB',
-        'After=hifi-music.service\nRequires=hifi-music.service\nPartOf=hifi-music.service\n'), 0o644)
-    java_env = ('Environment=JAVA_HOME=' + p['java_home'] + '\nEnvironment=PATH=' +
-                p['java_home'] + '/bin:/usr/local/bin:/usr/bin:/bin\n') if p.get('java_home') else ''
-    if p['manage_minim']:
-        # USB supervisor starts/stops this static unit. Do not independently enable it.
-        files[units / 'hifi-minimserver.service'] = ('[Unit]\nDescription=HiFi MinimServer music library\n\n'
-            '[Service]\nType=simple\nWorkingDirectory=' + str(root / 'minimserver') + '\n' + java_env +
-            'ExecStart=' + str(root / 'minimserver/bin/startd') + ' wait\nRestart=on-failure\nRestartSec=10\n'
-            'TimeoutStopSec=30\nUMask=0022\n', 0o644)
-    if not p.get('native_bootstrap'):
-        files[units / 'hifi-minimserver.service.d/usb-storage.conf'] = (
-            '[Service]\nExecStart=\nExecStart=' + str(root / BINARIES['hifi-music-service']) +
-            ' -home ' + str(root) + ' -minim-runtime\nTimeoutStopSec=45\n', 0o644)
-    if p['manage_bubble']:
-        bubble_domain = p.get('bubble_public_domain')
-        jvm_args = '-Xmx256m'
-        args = str(launcher) + ' bubble ' + str(root) + ' ' + str(p['web_port'])
-        if bubble_domain:
-            args += ' ' + public_domain(bubble_domain)
-            text = unit('HiFi BubbleUPnP remote media gateway', root / 'bubbleupnp', '/usr/bin/python3', args,
-                        dependencies='Wants=' + BUBBLE_RELAY_UNIT + '\n')
-            # authbind grants only port 80 through its setuid helper.
-            text = text.replace('NoNewPrivileges=true\n', '')
-            jvm_args += ' -Djava.net.preferIPv4Stack=true'
-        else:
-            text = unit('HiFi BubbleUPnP remote media gateway', root / 'bubbleupnp', '/usr/bin/python3', args)
-        files[units / 'hifi-bubbleupnp.service'] = (text.replace('[Service]\n', '[Service]\n' + java_env +
-                                                   'Environment="USER_JVM_ARGS=' + jvm_args + '"\n'), 0o644)
-    relay_unit = units / BUBBLE_RELAY_UNIT
-    if p.get('bubble_public_domain'):
-        args = str(launcher) + ' bubble-relay ' + str(root) + ' ' + str(p['web_port']) + ' ' + public_domain(p['bubble_public_domain'])
-        files[relay_unit] = (unit('HiFi public BubbleUPnP relay', root / 'music-service', '/usr/bin/python3', args,
-                                 dependencies='After=hifi-bubbleupnp.service\nPartOf=hifi-bubbleupnp.service\n'), 0o644)
-    elif relay_unit.exists():
-        files[relay_unit] = ('[Unit]\nDescription=HiFi BubbleUPnP relay disabled\n\n[Service]\nType=oneshot\nExecStart=/bin/true\n', 0o644)
-    return {path: (data.encode(), mode) for path, (data, mode) in files.items()}
 
 
 def sha(data):
@@ -526,7 +147,7 @@ def validate_executable(data, name, expected, architecture):
 def payload(path, architecture):
     with zipfile.ZipFile(str(path)) as bundle:
         if sorted(bundle.namelist()) != sorted(list(BINARIES) + ['manifest.json']):
-            raise ValueError('Bundle must contain only the two executables and manifest.json')
+            raise ValueError('Bundle must contain only hifi-manager and manifest.json')
         if any(item.file_size > 80 * 1024 * 1024 for item in bundle.infolist()):
             raise ValueError('Oversized bundle member')
         manifest = json.loads(bundle.read('manifest.json').decode())
@@ -555,252 +176,334 @@ def atomic(path, data, mode):
             os.unlink(temp)
 
 
-def wait_http(url, predicate=lambda body: bool(body), timeout=90, opener=None):
-    deadline = time.monotonic() + timeout
-    if opener is None:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    while True:
-        try:
-            with opener.open(url, timeout=3) as response:
-                if response.status == 200 and predicate(response.read(2 * 1024 * 1024)):
-                    return
-        except (OSError, ValueError):
-            pass
-        if time.monotonic() >= deadline:
-            raise RuntimeError('Readiness timeout: ' + url)
-        time.sleep(0.5)
+MANAGER = 'hifi-manager.service'
+LEGACY_UNITS = ('hifi-bubble-relay.service', 'hifi-bubbleupnp.service',
+                'hifi-music.service', 'hifi-minimserver.service')
+XML_LIMIT = 2 * 1024 * 1024
 
 
-def active_library(root):
-    """Use the supervisor's live mount, not the initial provisioning pathname."""
+def unit_directory():
+    return pathlib.Path.home() / '.config/systemd/user'
+
+
+def volume_id(mount):
     try:
-        state = json.loads((root / 'logs/library-state.json').read_text())
-        mount = pathlib.Path(state['mount'])
-        selected = str(mount / 'hifi-music-nano/music')
-        generation = mount_identity(str(mount))
-        if (state.get('paused') or not mount.is_absolute() or '..' in mount.parts or not generation or state.get('selected') != selected or
-                state.get('data_root') != str(mount / 'hifi-music-nano') or
-                not re.fullmatch('[0-9a-fA-F]{48}', state.get('volume', '')) or
-                generation != state.get('mount_id')):
+        project = pathlib.Path(mount) / 'hifi-music-nano'
+        path = project / 'library-id'
+        if project.is_symlink() or path.is_symlink() or not path.is_file() or path.stat().st_size > 128:
             return None
-        identity = mount / 'hifi-music-nano/library-id'
-        if identity.stat().st_size > 128 or identity.read_text().strip() != state['volume']:
-            return None
-        return selected
-    except (OSError, ValueError, KeyError, TypeError):
+        value = path.read_text().strip()
+        return value if re.fullmatch('[0-9a-fA-F]{48}', value) else None
+    except (OSError, ValueError):
         return None
 
 
-def health(p):
-    root = pathlib.Path(p['root'])
-    origin, web_opener = manager_endpoint(p)
-    web = origin + '/healthz'
-    wait_http(web, lambda b: bool(manager_health(b)), opener=web_opener)
-    if p.get('manager_public_domain'):
-        check_public_https(p['manager_public_domain'], MANAGER_TUNNEL_PORT, '/api/auth/status',
-                           lambda response: response.status == 200 and json.loads(response.read(4096)) == {'authenticated': False})
-    bubble_domain = p.get('bubble_public_domain')
-    if bubble_domain:
-        def requires_digest(response):
-            return (response.status == 401 and
-                    response.getheader('WWW-Authenticate', '').lower().startswith('digest '))
-
-        check_public_https(bubble_domain, BUBBLE_HTTPS_TUNNEL_PORT, '/res/connectiontest', requires_digest)
-        server_info = xmlrpc.client.dumps((), methodname='upnpbridge.getServerInfo').encode()
-        check_public_https(bubble_domain, BUBBLE_HTTPS_TUNNEL_PORT, '/xmlrpc', requires_digest, body=server_info)
-    music = active_library(root)
-    if music is None and mount_identity(p['volume']) is None:
-        selected = [None]
-        def waiting_for_disk(body):
-            ready = manager_health(body)['storage_ready']
-            live = active_library(root)
-            if live:
-                if ready:
-                    selected[0] = live
-                return ready
-            return not ready
-        wait_http(web, waiting_for_disk, opener=web_opener)
-        music = selected[0]
-        if music is None:
-            return
-    # Settings remain available before the first disk is initialized.
-    if music is None and not (pathlib.Path(p['volume'])/'hifi-music-nano/library-id').exists():
-        return
-    if music is None:
-        music = p['volume'] + '/hifi-music-nano/music'
-    wait_http(p['backend_description'], lambda b: b'ContentDirectory' in b)
-    browse = 'http://' + p['lan_ip'] + ':' + str(p['browse_port'])
-    wait_http(browse + '/device.xml', lambda b: p['browse_udn'].encode() in b)
-    wait_http(browse + '/upnp/content.xml', lambda b: b'Browse' in b)
-    wait_http(browse + '/upnp/connection.xml', lambda b: b'GetProtocolInfo' in b)
-    wait_http(web, lambda b: manager_health(b)['storage_ready'], opener=web_opener)
-    # Empty and populated libraries must both support a real ContentDirectory request.
-    action = 'urn:schemas-upnp-org:service:ContentDirectory:1'
-    soap = ('<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
-            's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:Browse xmlns:u="' + action +
-            '"><ObjectID>0</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag><Filter>*</Filter>'
-            '<StartingIndex>0</StartingIndex><RequestedCount>0</RequestedCount><SortCriteria/>'
-            '</u:Browse></s:Body></s:Envelope>').encode()
-    request = urllib.request.Request(browse + '/upnp/content/control', data=soap,
-                                     headers={'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '"' + action + '#Browse"'})
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(request, timeout=15) as response:
-        document = ET.fromstring(response.read(2 * 1024 * 1024))
-    if not any(node.tag.endswith('TotalMatches') and node.text == '4' for node in document.iter()):
-        raise RuntimeError('UPnP library categories are not ready')
-    if active_library(root) != music:
-        raise RuntimeError('USB supervisor selected a different library')
-    if p['manage_bubble']:
-        wait_http(bubble_local_url(p))
+def find_volume(root, configured):
+    preference = root / 'config/data-disk.json'
+    if preference.exists():
+        selected = json.loads(preference.read_text())['volume_id']
+        if not re.fullmatch('[0-9a-fA-F]{48}', selected):
+            raise ValueError('Invalid saved data-disk identity')
+        for line in pathlib.Path('/proc/self/mountinfo').read_text().splitlines():
+            fields = line.split()
+            if len(fields) > 6 and 'rw' in fields[5].split(','):
+                mount = pathlib.Path(fields[4].replace('\\040', ' '))
+                if volume_id(mount) == selected:
+                    return mount
+        return None  # An explicitly selected offline disk must not be replaced.
+    return safe_path(configured) if configured else None
 
 
-def restart_set(changed):
-    services = set()
-    for path in changed:
-        name = path.name
-        if name in ('launch-service.py', 'config.json', 'hifi-music-service', 'hifi-music.service'):
-            services.update(('hifi-music.service', 'hifi-manager.service'))
-            if name == 'launch-service.py':
-                services.add(LAN_REBIND)
-        elif name in ('hifi-manager', 'hifi-manager.service'):
-            services.add('hifi-manager.service')
-        elif name == 'hifi-minimserver.service' or (name == 'usb-storage.conf' and path.parent.name == 'hifi-minimserver.service.d'):
-            services.update(('hifi-minimserver.service', 'hifi-music.service', 'hifi-manager.service'))
-        elif name in ('hifi-bubbleupnp.service', BUBBLE_RELAY_UNIT, LAN_REBIND):
-            services.add(name)
-    return services
+def resolve(profile):
+    p = dict(profile)
+    allowed = {'root', 'volume', 'lan_ip', 'lan_cidr', 'web_port', 'manager_public_domain',
+               'manager_lan_hostname', 'webdav_public'}
+    if set(p) - allowed:
+        raise ValueError('Unknown device settings: ' + ', '.join(sorted(set(p) - allowed)))
+    root = safe_path(p.get('root', '~/hifi'))
+    if root.resolve() != root:
+        raise ValueError('Use a real deployment directory rather than a symbolic link')
+    p['root'] = str(root)
+    if p.get('volume'):
+        p['volume'] = str(safe_path(p['volume']))
+    connection = os.environ.get('SSH_CONNECTION', '').split()
+    ip = ipaddress.ip_address(p.get('lan_ip') or (connection[2] if len(connection) == 4 else ''))
+    if ip.version != 4 or not any(ip in n for n in PRIVATE):
+        raise ValueError('Set lan_ip to a literal private IPv4 address assigned to this device')
+    p['lan_ip'] = str(ip)
+    addresses = json.loads(command('ip', '-j', '-4', 'address', 'show'))
+    prefix = next((a['prefixlen'] for interface in addresses for a in interface.get('addr_info', [])
+                   if a.get('local') == str(ip)), None)
+    if prefix is None:
+        raise ValueError('lan_ip is not assigned to this device')
+    p['lan_cidr'] = str(private_network(p.get('lan_cidr', str(ip) + '/' + str(prefix))))
+    if ip not in ipaddress.ip_network(p['lan_cidr']):
+        raise ValueError('lan_ip is outside lan_cidr')
+    p.setdefault('web_port', 8787)
+    if type(p['web_port']) is not int or not 1024 <= p['web_port'] <= 65535:
+        raise ValueError('web_port must be an unprivileged TCP port')
+    for field in ('manager_public_domain', 'manager_lan_hostname'):
+        if field in p:
+            p[field] = public_domain(p[field])
+    if p.get('manager_lan_hostname') and not p['manager_lan_hostname'].endswith('.local'):
+        raise ValueError('manager_lan_hostname must be a .local hostname')
+    p.setdefault('webdav_public', False)
+    if type(p['webdav_public']) is not bool or p['webdav_public'] and not p.get('manager_public_domain'):
+        raise ValueError('webdav_public must be a boolean and requires manager_public_domain')
+    return p
 
 
-def activate(p, services):
-    units = pathlib.Path.home() / '.config/systemd/user'
-    if 'hifi-minimserver.service' in services:
-        try:
-            systemctl('is-active', 'hifi-minimserver.service')
-        except subprocess.SubprocessError:
-            pass  # The USB supervisor starts it after preparing the music link.
-        else:
-            systemctl('restart', 'hifi-minimserver.service')
-    for name in ('hifi-music.service', 'hifi-manager.service', 'hifi-bubbleupnp.service', BUBBLE_RELAY_UNIT, LAN_REBIND):
-        if not (units / name).exists():
-            continue
-        if name == 'hifi-bubbleupnp.service' and not p['manage_bubble']:
-            continue
-        if name == BUBBLE_RELAY_UNIT and not p.get('bubble_public_domain'):
-            if name in services:
-                systemctl('stop', name)
-            continue
-        if name in services:
-            systemctl('restart', name)
-        else:
-            systemctl('start', name)
-        if name == 'hifi-bubbleupnp.service':
-            wait_http(bubble_local_url(p))
+def public_endpoint(p, validate_tls=False):
+    domain = p['manager_public_domain']
+    config = pathlib.Path(p['root']) / 'config'
+    if validate_tls:
+        cert, key = (config / ('manager-public-tls-' + name + '.pem') for name in ('cert', 'key'))
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(str(cert), str(key), password='')
+    context = ssl.create_default_context()
+
+    return 'https://' + domain, urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), ManagerRedirectHandler(),
+        BoundHTTPSHandler('127.0.0.1', context, MANAGER_TUNNEL_PORT))
 
 
-def stop_services(services, ignore_errors=False):
-    for name in (LAN_REBIND, BUBBLE_RELAY_UNIT, 'hifi-manager.service', 'hifi-music.service',
-                 'hifi-bubbleupnp.service', 'hifi-minimserver.service'):
-        if name in services:
-            try:
-                systemctl('stop', name)
-            except subprocess.SubprocessError:
-                if not ignore_errors:
-                    raise
+def read_health(url, opener):
+    with opener.open(url + '/healthz', timeout=4) as response:
+        return manager_health(response.read(4096))
 
 
-def apply_files(p, files, generation, reinstall=False):
-    if mount_identity(p['volume']) != generation:
-        raise RuntimeError('Music mount changed after preflight')
-    root = pathlib.Path(p['root'])
-    changed, previous = {}, {}
-    for path, value in files.items():
-        try:
-            with path.open('rb') as stream:
-                installed = (stream.read(), os.fstat(stream.fileno()).st_mode & 0o777)
-        except FileNotFoundError:
-            installed = None
-        if reinstall or installed != value:
-            changed[path] = value
-            previous[path] = installed
-    enabled = ['hifi-music.service', 'hifi-manager.service']
-    if any(path.name == LAN_REBIND for path in files):
-        enabled.append(LAN_REBIND)
-    if p['manage_bubble']:
-        enabled.append('hifi-bubbleupnp.service')
-    was_enabled = {}
-    for name in enabled:
-        try:
-            was_enabled[name] = systemctl('is-enabled', name) == 'enabled'
-        except subprocess.SubprocessError:
-            was_enabled[name] = False
-    # Back up only the files this installer owns, never music, DBs or vendor credentials.
-    backup = root / 'deployment/previous'
-    if changed:
-        backup.mkdir(parents=True, exist_ok=True)
-        for index, (path, value) in enumerate(previous.items()):
-            if value is not None:
-                atomic(backup / str(index), value[0], 0o600)
-        atomic(backup / 'manifest.json', json.dumps({str(i): str(path) for i, path in enumerate(previous)}).encode(), 0o600)
-    services = restart_set(changed)
-    if p['manage_bubble'] and root / 'deployment/launch-service.py' in changed:
-        services.add('hifi-bubbleupnp.service')
-    if p.get('bubble_public_domain'):
-        if root / BINARIES['hifi-music-service'] in changed or 'hifi-bubbleupnp.service' in services:
-            services.add(BUBBLE_RELAY_UNIT)
+def unit_state(name, prop):
     try:
-        if reinstall:
-            units = pathlib.Path.home() / '.config/systemd/user'
-            stop_services({name for name in services if (units / name).is_file()})
-        for path, (data, mode) in changed.items():
-            atomic(path, data, mode)
-        command(str(root / BINARIES['hifi-music-service']), '-home', str(root), '-check')
-        if changed:
+        return systemctl('show', '-p', prop, name).split('=', 1)[-1]
+    except subprocess.SubprocessError:
+        return ''
+
+
+def installed_unit(name):
+    return unit_state(name, 'LoadState') in ('loaded', 'masked')
+
+
+def ensure_manager_idle(p):
+    # Check the currently installed endpoint first, even if this deployment
+    # changes its port, TLS identity or IP. The old unit remains intact here.
+    if unit_state(MANAGER, 'ActiveState') == 'active':
+        saved = pathlib.Path(p['root']) / 'deployment/state.json'
+        previous = dict(p)
+        if saved.is_file():
+            old = json.loads(saved.read_text())
+            for key in ('web_port', 'manager_lan_hostname'):
+                previous.pop(key, None)
+                if key in old:
+                    previous[key] = old[key]
+            previous.setdefault('web_port', 8787)
+        old_url, old_opener = manager_endpoint(previous)
+        if read_health(old_url, old_opener)['busy']:
+            raise RuntimeError('Wait for the current upload or file task before deployment')
+    else:
+        # An unmanaged listener must never be replaced or mistaken for our unit.
+        with socket.socket() as check:
+            check.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            check.bind((p['lan_ip'], p['web_port']))
+
+
+def preflight(p):
+    root = pathlib.Path(p['root'])
+    if not os.access(str(root if root.exists() else root.parent), os.W_OK):
+        raise ValueError('Deployment directory is not writable')
+    if not os.environ.get('XDG_RUNTIME_DIR') and not pathlib.Path('/run/user/' + str(os.getuid())).is_dir():
+        raise ValueError('A systemd user session is required')
+    if command('loginctl', 'show-user', str(os.getuid()), '-p', 'Linger') != 'Linger=yes':
+        raise ValueError('Enable systemd user linger before installing')
+    systemctl('list-unit-files', '--no-pager')
+    url, _ = manager_endpoint(p, validate_tls=True)
+    if not url.startswith('https://'):
+        raise ValueError('LAN WebDAV and management require HTTPS certificates')
+    if p.get('manager_public_domain'):
+        public_endpoint(p, validate_tls=True)
+    ensure_manager_idle(p)
+    mount = find_volume(root, p.get('volume'))
+    generation = mount_identity(str(mount)) if mount else None
+    return (str(mount), generation, volume_id(mount)) if generation else (None, None, None)
+
+
+def render(p):
+    root = pathlib.Path(p['root'])
+    units = unit_directory()
+    launcher = root / 'deployment/launch-service.py'
+    settings = {key: p[key] for key in ('lan_cidr', 'web_port', 'manager_public_domain',
+                                       'manager_lan_hostname', 'webdav_public') if key in p}
+    return {
+        root / 'config/manager-network.json': ((json.dumps(settings, indent=2) + '\n').encode(), 0o600),
+        launcher: (launcher_source().encode(), 0o600),
+        units / MANAGER: (unit('HiFi music manager and WebDAV', root / 'manager-service',
+                               '/usr/bin/python3', str(launcher) + ' manager ' + str(root), '256MiB').encode(), 0o644),
+        units / LAN_REBIND: (unit('Refresh HiFi listener after a LAN address change', root,
+                                  '/usr/bin/python3', str(launcher) + ' watch ' + str(root)).encode(), 0o644),
+    }
+
+
+def dav_request(url, opener, method, status, headers=None, data=None):
+    request = urllib.request.Request(url + '/webdav/', data=data, method=method, headers=headers or {})
+    try:
+        response = opener.open(request, timeout=5)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        if response.code != status:
+            raise ValueError('WebDAV ' + method + ' returned ' + str(response.code) + ', expected ' + str(status))
+        if status == 401 and not response.headers.get('WWW-Authenticate', '').startswith('Basic '):
+            raise ValueError('WebDAV did not issue a Basic challenge')
+        if status == 207:
+            body = response.read(XML_LIMIT + 1)
+            if len(body) > XML_LIMIT:
+                raise ValueError('WebDAV property response exceeds the health check limit')
+            xml = ET.fromstring(body)
+            if xml.tag != '{DAV:}multistatus' or xml.findtext('{DAV:}response/{DAV:}href') != '/webdav/':
+                raise ValueError('WebDAV did not describe its root collection')
+
+
+def health(p, selection, timeout=90):
+    root = pathlib.Path(p['root'])
+    url, opener = manager_endpoint(p)
+    deadline = time.monotonic() + timeout
+    expected_id = selection[2]
+    last = None
+    while True:
+        try:
+            state = read_health(url, opener)
+            if expected_id and (not state['storage_ready'] or state.get('volume_id') != expected_id):
+                raise ValueError('The expected music disk is not active')
+            with opener.open(url + '/', timeout=5) as response:
+                if b'<div id="root">' not in response.read(65536):
+                    raise ValueError('Management Web shell not ready')
+            key = (root / 'config/webdav.key').read_bytes()
+            if len(key) != 32:
+                raise ValueError('Invalid WebDAV key')
+            password = base64.urlsafe_b64encode(key).rstrip(b'=')
+            headers = {'Depth': '0', 'Authorization': 'Basic ' + base64.b64encode(b'hifi:' + password).decode()}
+            status = 207 if state['storage_ready'] else 503
+            dav_request(url, opener, 'PROPFIND', 401, {'Depth': '0'})
+            dav_request(url, opener, 'PROPFIND', status, headers)
+            if p.get('manager_public_domain'):
+                pub_url, pub_opener = public_endpoint(p)
+                with pub_opener.open(pub_url + '/api/auth/status', timeout=5) as response:
+                    if json.loads(response.read(4096)) != {'authenticated': False}:
+                        raise ValueError('Invalid public management response')
+                dav_request(pub_url, pub_opener, 'PROPFIND', 401 if p['webdav_public'] else 404, {'Depth': '0'})
+                if p['webdav_public']:
+                    dav_request(pub_url, pub_opener, 'PROPFIND', status, headers)
+            return state
+        except (OSError, ValueError, ET.ParseError) as error:
+            last = error
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Management Web / WebDAV readiness failed: ' + str(last))
+        time.sleep(0.5)
+
+
+def legacy_files(root):
+    units = unit_directory()
+    return [*(units / name for name in LEGACY_UNITS),
+            units / 'hifi-minimserver.service.d/usb-storage.conf',
+            root / 'music-service/hifi-music-service']
+
+
+def read_managed(path):
+    # Never follow user-controlled symlinks when taking backups or replacing files.
+    if path.resolve() != path:
+        raise ValueError('Unexpected symlink in managed path: ' + str(path))
+    try:
+        with path.open('rb') as stream:
+            return stream.read(), os.fstat(stream.fileno()).st_mode & 0o777
+    except FileNotFoundError:
+        return None
+
+
+def apply_files(p, files, selection, reinstall=False):
+    root = pathlib.Path(p['root'])
+    url, _ = manager_endpoint(p)
+    ensure_manager_idle(p)
+    if selection[0] and mount_identity(selection[0]) != selection[1]:
+        raise RuntimeError('Music mount changed after preflight')
+    changes, previous = {}, {}
+    for path, value in files.items():
+        installed = read_managed(path)
+        if reinstall or installed != value:
+            changes[path], previous[path] = value, installed
+    for path in legacy_files(root):
+        installed = read_managed(path)
+        if installed is not None:
+            changes[path], previous[path] = None, installed
+    legacy = [name for name in LEGACY_UNITS if installed_unit(name)]
+    names = (LAN_REBIND, MANAGER) + tuple(legacy)
+    active = {name for name in names if unit_state(name, 'ActiveState') == 'active'}
+    enabled = {name for name in names if unit_state(name, 'UnitFileState') == 'enabled'}
+    changed_units = bool(changes or legacy)
+    if changes:
+        backup = root / 'deployment/previous'
+        if backup.resolve() != backup:
+            raise ValueError('Unexpected symlink in the deployment backup path')
+        manifest = {}
+        for i, (path, value) in enumerate(previous.items()):
+            if value is not None:
+                atomic(backup / str(i), value[0], 0o600)
+                manifest[str(i)] = {'path': str(path), 'mode': value[1]}
+        atomic(backup / 'manifest.json', json.dumps(manifest).encode(), 0o600)
+    if changed_units:
+        ensure_manager_idle(p)
+    try:
+        if changed_units:
+            for name in names:
+                if name in active:
+                    systemctl('stop', name)
+            for name in legacy:
+                if name in enabled:
+                    systemctl('disable', name)
+            for path, value in changes.items():
+                if value is None:
+                    path.unlink()
+                else:
+                    atomic(path, value[0], value[1])
             systemctl('daemon-reload')
-        missing = [name for name in enabled if not was_enabled[name]]
+        missing = [name for name in (MANAGER, LAN_REBIND) if name not in enabled]
         if missing:
             systemctl('enable', *missing)
-        activate(p, set() if reinstall else services)
-        health(p)
-        atomic(root / 'deployment/state.json', json.dumps(dict(p,storage_mode='usb'), indent=2).encode(), 0o600)
+        systemctl('start', MANAGER, LAN_REBIND)
+        state = health(p, selection)
+        for name in LEGACY_UNITS:
+            if unit_state(name, 'ActiveState') == 'active':
+                raise RuntimeError('Retired service is still active: ' + name)
+        atomic(root / 'deployment/state.json', json.dumps(p, indent=2).encode(), 0o600)
     except BaseException:
-        # Stop new code before restoring old executables/units. Persistent data is never replaced.
-        stop_services(services, ignore_errors=True)
-        for path, value in previous.items():
-            if value is None:
-                if path.exists():
-                    path.unlink()
-            else:
-                atomic(path, value[0], value[1])
-        for name in enabled:
-            if not was_enabled[name]:
+        if changed_units:
+            for name in (LAN_REBIND, MANAGER):
                 try:
-                    systemctl('disable', name)
+                    if installed_unit(name):
+                        systemctl('stop', name)
+                        if name not in enabled:
+                            systemctl('disable', name)
                 except subprocess.SubprocessError:
                     pass
-        systemctl('daemon-reload')
-        # Existing installation's configuration is authoritative during rollback.
-        config = root / 'music-service/config.json'
-        if config.exists():
-            old = dict(p)
-            saved = root / 'deployment/state.json'
-            if saved.exists():
-                for key in ('manager_public_domain', 'bubble_public_domain', 'manager_lan_hostname'):
-                    old.pop(key, None)
-                old.update(json.loads(saved.read_text()))
-            oldcfg = json.loads(config.read_text())
-            old['lan_ip'], port = oldcfg['browse_listen'].rsplit(':', 1)
-            old['browse_port'] = int(port)
-            try:
-                activate(old, services)
-            except Exception:
-                print('Rollback restored files; service recovery needs attention. Inspect journalctl --user.', file=sys.stderr)
+            for path, value in previous.items():
+                if value is None:
+                    if path.exists():
+                        path.unlink()
+                else:
+                    atomic(path, value[0], value[1])
+            systemctl('daemon-reload')
+            if enabled:
+                systemctl('enable', *sorted(enabled))
+            # Restore old services in dependency order.
+            if active:
+                systemctl('start', *sorted(active))
         raise
-    result = {'changed_files': [str(path) for path in changed], 'restarted_services': sorted(services),
-              'data_preserved': True, 'web_url': manager_endpoint(p)[0]}
+    result = {'changed_files': [str(path) for path in changes if changes[path] is not None],
+              'retired_files': [str(path) for path in changes if changes[path] is None],
+              'retired_services': legacy, 'storage_ready': state['storage_ready'],
+              'volume_id': state.get('volume_id'), 'data_preserved': True, 'web_url': url, 'webdav_url': url + '/webdav/'}
     if p.get('manager_public_domain'):
         result['public_web_url'] = 'https://' + p['manager_public_domain']
-    if p.get('bubble_public_domain'):
-        result['public_bubble_url'] = 'https://' + p['bubble_public_domain']
+        if p['webdav_public']:
+            result['public_webdav_url'] = result['public_web_url'] + '/webdav/'
     return result
 
 
@@ -808,70 +511,47 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile-json', required=True)
     parser.add_argument('--bundle')
-    parser.add_argument('--reuse-manifest', help='expected hashes when the same binaries are already installed')
+    parser.add_argument('--reuse-manifest')
+    parser.add_argument('--expect-volume')
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--reinstall', action='store_true')
-    parser.add_argument('--prepare-minim', action='store_true', help='first device only: register the initialized vendor daemon with systemd')
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
-    if args.reinstall and (not args.apply or not args.bundle or args.prepare_minim or args.check):
+    if args.reinstall and (not args.apply or not args.bundle or args.check):
         parser.error('--reinstall requires --apply and a verified --bundle')
-    profile = json.loads(args.profile_json)
-    if args.prepare_minim:
-        root = safe_path(profile.get('root', '~/hifi'))
-        units = pathlib.Path.home() / '.config/systemd/user'
-        if (root / 'music-service/config.json').exists() or (units / 'hifi-minimserver.service').exists():
-            raise ValueError('Minim preparation is for a new installation only; existing services are preserved')
-        # Discovery is possible only after this initialized daemon starts.
-        profile.setdefault('backend_description', 'http://127.0.0.1:9791/pending/Upnp/device.xml')
-        profile['manage_minim'] = True
-    p = resolve(profile)
-    generation = preflight(p)
-    if args.prepare_minim:
-        p['browse_udn'] = 'uuid:00000000-0000-0000-0000-000000000000'
-        target = units / 'hifi-minimserver.service'
-        data, mode = render(dict(p, manage_minim=True,native_bootstrap=True))[target]
-        try:
-            atomic(target, data, mode)
-            systemctl('daemon-reload')
-            systemctl('start', target.name)
-            backend = wait_backend(p['lan_ip'])
-        except Exception:
-            systemctl('stop', target.name)
-            target.unlink()
-            systemctl('daemon-reload')
-            raise
-        print(json.dumps({'minim_service': 'started', 'backend_description': backend}))
-        return
+    p = resolve(json.loads(args.profile_json))
     architecture = {'aarch64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]
+    root = pathlib.Path(p['root'])
     if not args.apply:
+        selection = preflight(p)
         print(json.dumps({'architecture': architecture, 'profile': p, 'prerequisites': 'ready',
-                          'disk_mounted': generation is not None,
-                          'binary_sha256': {name: sha((pathlib.Path(p['root']) / relative).read_bytes())
-                                            for name, relative in BINARIES.items() if (pathlib.Path(p['root']) / relative).is_file()},
-                          'installed': (pathlib.Path(p['root']) / 'manager-service/hifi-manager').is_file()}))
+                          'disk_mounted': selection[1] is not None, 'volume_id': selection[2],
+                          'binary_sha256': {name: sha((root / relative).read_bytes())
+                                            for name, relative in BINARIES.items() if (root / relative).is_file()}}))
         return
     if bool(args.bundle) == bool(args.reuse_manifest):
         parser.error('--apply requires exactly one of --bundle or --reuse-manifest')
-    p.setdefault('browse_udn', 'uuid:' + str(uuid.uuid4()))
-    files = render(p)
+    # Verify the complete bundle before stopping anything on the device.
     if args.bundle:
         executables = payload(args.bundle, architecture)
     else:
         manifest = json.loads(args.reuse_manifest)
         if manifest['architecture'] != architecture or set(manifest['files']) != set(BINARIES):
             raise ValueError('Invalid reuse manifest')
-        executables = {name: (pathlib.Path(p['root']) / relative).read_bytes() for name, relative in BINARIES.items()}
+        executables = {name: (root / relative).read_bytes() for name, relative in BINARIES.items()}
         for name, data in executables.items():
             validate_executable(data, name, manifest['files'][name], architecture)
+    files = render(p)
     for name, data in executables.items():
-        files[pathlib.Path(p['root']) / BINARIES[name]] = (data, 0o755)
-    # Serialize deployments on a device, including first installation.
+        files[root / BINARIES[name]] = (data, 0o755)
     import fcntl
     lock_path = pathlib.Path(os.environ.get('XDG_RUNTIME_DIR', '/run/user/' + str(os.getuid()))) / 'hifi-deploy.lock'
     with lock_path.open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        print(json.dumps(apply_files(p, files, generation, reinstall=args.reinstall)))
+        selection = preflight(p)
+        if args.expect_volume and selection[2] != args.expect_volume:
+            raise RuntimeError('The selected music disk changed after the initial preflight')
+        print(json.dumps(apply_files(p, files, selection, reinstall=args.reinstall)))
 
 
 if __name__ == '__main__':

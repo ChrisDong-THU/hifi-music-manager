@@ -27,11 +27,7 @@ func storeOperationTx(tx *bolt.Tx, op *Operation) error {
 		}
 		op.Sequence = seq
 	}
-	raw, err := marshal(op)
-	if err != nil {
-		return err
-	}
-	if err := b.Put([]byte(op.ID), raw); err != nil {
+	if err := putRecord(b, op.ID, op); err != nil {
 		return err
 	}
 	return trimOperationHistoryTx(tx)
@@ -83,15 +79,11 @@ func (a *app) fail(op *Operation, err error) error {
 
 // Commit each published file immediately; a later failure preserves preceding writes.
 func storeTrackTx(tx *bolt.Tx, t Track) error {
-	raw, err := marshal(t)
-	if err != nil {
-		return err
-	}
 	b := tx.Bucket([]byte("tracks"))
-	if _, err = b.NextSequence(); err != nil {
+	if _, err := b.NextSequence(); err != nil {
 		return err
 	}
-	return b.Put([]byte(t.ID), raw)
+	return putRecord(b, t.ID, t)
 }
 
 func (a *app) recordTrack(op *Operation, t *Track, deletedID string) error {

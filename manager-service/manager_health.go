@@ -6,10 +6,11 @@ type managerHealth struct {
 	Service      string `json:"service"`
 	Busy         bool   `json:"busy"`
 	StorageReady bool   `json:"storage_ready"`
+	VolumeID     string `json:"volume_id,omitempty"`
 }
 
 func fileJobActive(job *task) bool {
-	return job.Kind != "sync" && (job.State == "queued" || job.State == "running")
+	return job.State == "queued" || job.State == "running"
 }
 
 func (a *app) fileJobsActive() bool {
@@ -50,6 +51,9 @@ func (c *diskController) health() managerHealth {
 		health := c.active.health()
 		state.Busy = state.Busy || health.Busy
 		state.StorageReady = health.StorageReady && (c.targetID == "" || c.targetID == c.volumeID)
+		if state.StorageReady {
+			state.VolumeID = c.volumeID
+		}
 	}
 	return state
 }

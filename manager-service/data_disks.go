@@ -35,8 +35,6 @@ type diskController struct {
 	wake               chan struct{}
 	list               func(context.Context) ([]library.Drive, error)
 	mounted            func(library.Drive) bool
-	rescan             func(context.Context) error
-	standalone         bool
 	selectionEpoch     uint64
 	selecting          bool
 	diskJobMu          sync.Mutex
@@ -183,7 +181,7 @@ func (c *diskController) applyDiskSelection(ctx context.Context, in diskSelectio
 			return "", errors.New("请等待上传或当前文件请求完成后再切换")
 		}
 		for _, job := range c.active.taskSnapshot() {
-			if job.Kind != "sync" && job.Kind != "disks" && (job.State == "queued" || job.State == "running") {
+			if job.Kind != "disks" && fileJobActive(&job) {
 				c.mu.Unlock()
 				return "", errors.New("请等待当前文件任务完成后再切换")
 			}
@@ -244,18 +242,19 @@ func (c *diskController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if !strings.HasPrefix(r.URL.Path, "/api/") {
+	dav := isDAVPath(r.URL.Path)
+	if !dav && !strings.HasPrefix(r.URL.Path, "/api/") {
 		c.site.ServeHTTP(w, r)
 		return
 	}
 	c.mu.RLock()
-	mutation := r.Method != "GET" && r.Method != "HEAD"
+	mutation := !dav && r.Method != "GET" && r.Method != "HEAD"
 	if c.selecting && mutation {
 		c.mu.RUnlock()
 		problem(w, 503, errors.New("正在设置数据盘，请等待完成"))
 		return
 	}
-	ready := c.active != nil && (c.targetID == "" || c.targetID == c.volumeID)
+	ready := c.active != nil && (c.targetID == "" || c.targetID == c.volumeID) && (!dav || !c.selecting)
 	a, handler, status := c.active, c.handler, c.status
 	if ready {
 		ready = a.beginRequest(mutation)
@@ -268,6 +267,9 @@ func (c *diskController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		problem(w, 503, errors.New("数据盘尚未就绪，请在主页设置中选择数据盘"))
 		return
+	}
+	if dav {
+		handler = http.HandlerFunc(a.serveDAV)
 	}
 	a.serveRequest(w, r, handler, mutation)
 }
@@ -318,7 +320,7 @@ func (c *diskController) reconcile(ctx context.Context) {
 		c.mu.Unlock()
 		return // A newer selection superseded this discovery snapshot.
 	}
-	if err == nil && pref.VolumeID != "" && selection.Volume != pref.VolumeID {
+	if err == nil && pref.VolumeID != "" && selection.id != pref.VolumeID {
 		err = errors.New("等待指定数据盘就绪")
 	}
 	if err != nil {
@@ -327,7 +329,7 @@ func (c *diskController) reconcile(ctx context.Context) {
 		if pref.VolumeID != "" {
 			c.status = "等待指定数据盘就绪"
 		}
-		if c.standalone && pref.VolumeID != "" {
+		if pref.VolumeID != "" {
 			c.finishDiskTask(pref.VolumeID, errors.New(c.status))
 		}
 		c.mu.Unlock()
@@ -336,8 +338,8 @@ func (c *diskController) reconcile(ctx context.Context) {
 		}
 		return
 	}
-	if c.active != nil && c.volumeID == selection.Volume && c.active.home == home && c.active.storageMountID == selection.MountID {
-		c.finishDiskTask(selection.Volume, nil)
+	if c.active != nil && c.volumeID == selection.id && c.active.home == home && c.active.storageMountID == selection.drive.MountID {
+		c.finishDiskTask(selection.id, nil)
 		c.mu.Unlock()
 		return
 	}
@@ -352,7 +354,7 @@ func (c *diskController) reconcile(ctx context.Context) {
 		defer c.mu.Unlock()
 		if c.selectionEpoch == epoch {
 			c.status = message
-			c.finishDiskTask(selection.Volume, err)
+			c.finishDiskTask(selection.id, err)
 		}
 	}
 	if err := prepareVolumeDirectories(volume, library.MusicPath(volume), home, guard); err != nil {
@@ -371,23 +373,20 @@ func (c *diskController) reconcile(ctx context.Context) {
 		a.close()
 		return
 	}
-	a.csrf, a.cookieName, a.lan, a.rescan = c.security.csrf, c.security.cookieName, c.security.lan, c.rescan
-	a.storage = &storageInfo{Ready: true, VolumeID: selection.Volume, Root: library.DataPath(volume)}
-	a.storageMountID = selection.MountID
+	a.csrf, a.cookieName, a.lan = c.security.csrf, c.security.cookieName, c.security.lan
+	a.storage = &storageInfo{Ready: true, VolumeID: selection.id, Root: library.DataPath(volume)}
+	a.storageMountID = selection.drive.MountID
 	a.externalTasks = c.diskTasks
 	appCtx, cancel := context.WithCancel(ctx)
 	a.start(appCtx)
-	c.active, c.handler, c.cancel, c.volumeID = a, a.routes(c.site), cancel, selection.Volume
+	c.active, c.handler, c.cancel, c.volumeID = a, a.routes(c.site), cancel, selection.id
 	c.targetID = pref.VolumeID
 	c.status = ""
-	c.finishDiskTask(selection.Volume, nil)
+	c.finishDiskTask(selection.id, nil)
 	c.mu.Unlock()
 }
 
 func (c *diskController) currentSelection(ctx context.Context) (librarySelection, error) {
-	if !c.standalone {
-		return readLibrarySelection(c.project)
-	}
 	pref, err := library.ReadPreference(c.project)
 	if err != nil {
 		return librarySelection{}, err
@@ -404,29 +403,24 @@ func (c *diskController) currentSelection(ctx context.Context) (librarySelection
 		if !info.Initialized || (pref.VolumeID != "" && info.VolumeID != pref.VolumeID) {
 			continue
 		}
-		return librarySelection{Selected: library.MusicPath(d.Root), Volume: info.VolumeID,
-			MountID: d.MountID, Mount: d.Root, DataRoot: library.DataPath(d.Root)}, nil
+		return librarySelection{drive: d, id: info.VolumeID}, nil
 	}
 	return librarySelection{}, errors.New("等待指定数据盘就绪")
 }
 
-func runDiskManager(ctx context.Context, project string, lan netip.Prefix, rescanURL string, standalone bool, endpoints []managerEndpoint) error {
+func runDiskManager(ctx context.Context, project string, lan netip.Prefix, endpoints []managerEndpoint) error {
 	auth, err := openManagerAuth(project)
 	if err != nil {
 		return err
 	}
 	defer auth.db.Close()
+	dav, err := loadMusicDAV(project)
+	if err != nil {
+		return err
+	}
 	key := sha256.Sum256([]byte(project))
 	security := &app{csrf: uid(), cookieName: "hifi_session_" + hex.EncodeToString(key[:6]), lan: lan}
 	c := &diskController{project: project, security: security, site: staticSite(), status: "请选择数据盘", wake: make(chan struct{}, 1), list: library.ListDrives, mounted: library.Mounted}
-	c.standalone = standalone
-	if rescanURL != "" {
-		var err error
-		c.rescan, err = libraryRescan(rescanURL)
-		if err != nil {
-			return err
-		}
-	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	c.ctx = ctx
@@ -454,5 +448,5 @@ func runDiskManager(ctx context.Context, project string, lan netip.Prefix, resca
 		c.workers.Wait()
 		<-done
 	}()
-	return serveManager(ctx, endpoints, security, c, auth, c.health)
+	return serveManager(ctx, endpoints, security, c, auth, c.health, dav)
 }

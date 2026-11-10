@@ -43,7 +43,7 @@ func (a *app) readAlbumTracks(key string) ([]Track, error) {
 	if err != nil {
 		return nil, err
 	}
-	positions := index.byAlbum[key]
+	positions := index.albumMembers(key)
 	tracks := make([]Track, 0, len(positions))
 	for _, i := range positions {
 		tracks = append(tracks, index.tracks[i])
@@ -51,20 +51,10 @@ func (a *app) readAlbumTracks(key string) ([]Track, error) {
 	return tracks, nil
 }
 
-func (a *app) readTracks() ([]Track, error) {
-	var out []Track
-	err := a.db.View(func(tx *bolt.Tx) error {
-		var err error
-		out, err = a.readTracksTx(tx)
-		return err
-	})
-	return out, err
-}
-
 // Mutation-capable consumers receive their own slice. State polling uses the
 // immutable aggregates directly, without copying or walking the whole library.
-func (a *app) readTracksTx(tx *bolt.Tx) ([]Track, error) {
-	index, err := a.libraryIndexTx(tx)
+func (a *app) readTracks() ([]Track, error) {
+	index, err := a.readLibraryIndex()
 	if err != nil {
 		return nil, err
 	}

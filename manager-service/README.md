@@ -21,7 +21,8 @@ go run . -home ../downloads/manager-local -listen 127.0.0.1:8787 -data-disks
 | `http.go`、`draft*.go`、`import.go` | 上传、草稿读写、导入与删除 |
 | `catalog.go`、`library_index.go`、`library_query.go` | 不可变读模型与分页查询 |
 | `audio*.go`、`internal/audioquality/` | 标签、音频摘要与质量分析 |
-| `tasks.go`、`cleanup*.go`、`playback_sync.go` | 任务执行、清理、播放刷新 |
+| `tasks.go`、`cleanup*.go` | 任务执行、清理 |
+| `webdav*.go` | 只读曲库目录、独立认证和 HTTP Range 播放 |
 | `frontend/src/` | 页面、共享查询资源、上传、播放器和通知 |
 
 前端复用条件查询和分页资源，表单只存本地修改。草稿行支持点击选择、悬停高亮和键盘焦点提示；标签弹窗不会改变勾选状态，鼠标关闭后不保留焦点高亮。

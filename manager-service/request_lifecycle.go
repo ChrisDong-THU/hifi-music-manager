@@ -57,7 +57,7 @@ func (a *app) serveRequest(w http.ResponseWriter, r *http.Request, handler http.
 
 func (a *app) trackRequests(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mutation := r.Method != "GET" && r.Method != "HEAD"
+		mutation := !isDAVPath(r.URL.Path) && r.Method != "GET" && r.Method != "HEAD"
 		if !a.beginRequest(mutation) {
 			problem(w, 503, errors.New("数据盘正在切换，请稍后重试"))
 			return
