@@ -47,11 +47,11 @@ python -B scripts/check.py --go /path/to/go
 python -B scripts/check.py --race
 ```
 
-检查会打印实际 Go 版本，禁用隐式工具链下载并以本机平台运行。`--race` 要求已安装可用的 C 编译器，缺失时明确失败，不自动跳过。GitHub CI 在 Windows 和 Linux 上执行完整检查，Linux 额外启用竞态检测；平台专属测试在对应系统运行。
+检查会打印实际 Go 版本，禁用隐式工具链下载并以本机平台运行。`--race` 要求已安装可用的 C 编译器，缺失时明确失败，不自动跳过。所有检查由开发者在本地手动执行；请在 Windows 和 Linux 上分别运行平台专属测试，需要竞态检测时显式使用 `--race`。
 
 日常定位可使用 `--scope frontend`、`--scope go` 或 `--scope python`。Go 范围仍会校验前端依赖并重建内嵌资源，防止用过期 UI 验证；仅默认 `all` 范围代表完整检查。
 
-可通过 `--staticcheck /path/to/staticcheck` 在两个 Go 模块中增加静态分析，发现问题同样阻断检查。入口只使用显式指定的现有工具，不自动下载安装。CI 的独立强化任务使用 Go 1.27.3 安装固定的 `honnef.co/go/tools/cmd/staticcheck@v0.8.2` 到临时工具目录；该分析器安装要求 Go 1.26 或更新版本，建议使用与该 CI 任务相同的 Go 1.27.3。项目的最低 Go 版本仍由两个 `go.mod` 定义，并保留 Windows/Linux 下限检查。
+可通过 `--staticcheck /path/to/staticcheck` 在两个 Go 模块中增加静态分析，发现问题同样阻断检查。入口只使用显式指定的现有工具，不自动下载安装。本地已验证的工具组合是 Go 1.27.3 和 `honnef.co/go/tools/cmd/staticcheck@v0.8.2`；该分析器安装要求 Go 1.26 或更新版本，可由开发者按需安装到独立工具目录。项目的最低 Go 版本仍由两个 `go.mod` 定义。
 
 架构检查解析所有平台的 Go 源文件，包括当前系统不会编译的文件，缺失或空目录不会通过。`shared-library` 不允许反向依赖管理服务；`internal/audioquality` 只使用标准库和已采用的 FLAC 解码依赖，不能引入网络、数据库或应用业务层。新增依赖需明确修改规则并审查；规则及门禁自身也有失败用例。
 
