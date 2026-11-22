@@ -1,51 +1,113 @@
-# HiFi Music Manager
+<h1 align="center">HiFi Music Manager</h1>
 
-面向本机和局域网的音乐库管理工具。上传音乐、整理标签与封面、检测音源，并通过只读 WebDAV 提供正式曲库的目录浏览和原文件播放。
+<p align="center">
+  Your music, organized and ready to play. A self-hosted music library manager for local and LAN use.
+</p>
 
-Go 服务内嵌 React 界面、字体和许可证，运行时无需 Node.js 或数据库服务器。
+<div align="center">
 
-## 功能
+[![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![React](https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![WebDAV](https://img.shields.io/badge/WebDAV-Read%20Only-8B5CF6)](#features)
+[![Platforms](https://img.shields.io/badge/Linux-ARM64%20%7C%20x86__64-FCC624?logo=linux&logoColor=black)](#device-deployment)
 
-- 文件、文件夹、拖放和粘贴上传，按专辑整理草稿。
-- 歌曲多选、手动标签与封面编辑、重复音频提示和选择性导入。
-- FLAC、MP3 标签与封面写入；其他支持格式可原样导入。
-- FLAC、WAV、AIFF 整数 PCM 位深和频谱分析，结果用于提示，不证明母带来源。
-- 专辑、歌手、曲目搜索，浏览器试听，歌手头像与简介管理。
-- USB 数据盘选择、按盘索引、挂载校验。导入、编辑和删除提交后会直接反映到 WebDAV。
+</div>
 
-删除为永久删除，批量操作按歌曲逐项提交。活动草稿不按年龄清理。详见[存储与操作](docs/STORAGE.md)。
+<p align="center">
+  English | <a href="./docs/README_zh.md">简体中文</a>
+</p>
 
-## 快速开始
+<p align="center">
+  <a href="#interface-preview">Interface</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#device-deployment">Deployment</a> ·
+  <a href="#documentation-and-contributing">Documentation</a>
+</p>
 
-构建环境：Go 1.25+、Node.js 22.17+；离线部署工具另需 Python 3.8+ 和 OpenSSH。
+<a id="interface-preview"></a>
 
-Windows 在项目根目录执行：
+<table align="center">
+  <tr>
+    <td colspan="2" align="center">
+      <a href="./docs/assets/playback.jpg"><img src="./docs/assets/playback.jpg" alt="Music library with expanded album tracks and an active browser player" width="900"></a><br>
+      <b>Listen in your browser</b>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <a href="./docs/assets/home.jpg"><img src="./docs/assets/home.jpg" alt="Home page with music library statistics, WebDAV access, and operation history" width="440"></a><br>
+      <b>Home</b>
+    </td>
+    <td align="center">
+      <a href="./docs/assets/drafts.jpg"><img src="./docs/assets/drafts.jpg" alt="Upload page with an empty draft list and file and album-folder upload controls" width="440"></a><br>
+      <b>Upload &amp; review</b>
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  Captured from the running deployment on November 22, 2026, with the Chinese UI. All images are 1280 × 720 (16:9). Click an image for full size.
+</p>
+
+## About
+
+HiFi Music Manager brings uploads, metadata, artwork, audio analysis, and playback into one music library workflow. Review albums as drafts before importing them, then browse or play the original files through read-only WebDAV.
+
+The Go service embeds the React interface, fonts, and third-party licenses. Running a built application requires neither Node.js nor a separate database server.
+
+## Features
+
+- **Upload and review** — Add files or folders by selection, drag and drop, or paste. Organize drafts by album, select tracks, review duplicate-audio warnings, and import only what you choose.
+- **Edit your collection** — Update tags and artwork manually. Write FLAC and MP3 metadata and covers; import other supported formats unchanged.
+- **Inspect audio** — Analyze integer PCM bit depth and spectra in FLAC, WAV, and AIFF files. Results are indicators, not proof of a recording's mastering source.
+- **Browse and listen** — Search albums, artists, and tracks, preview music in your browser, and manage artist portraits and biographies.
+- **Use removable storage** — Select a mounted USB data disk, maintain an index for each disk, and validate its mount before accessing the library.
+- **Connect your player** — Browse directories and stream original files over read-only WebDAV. Committed imports, edits, and deletions appear immediately.
+
+Deletion is permanent, and batch operations commit one track at a time. Active drafts are not removed based on age. See [Storage and operations](./docs/STORAGE.md) for details.
+
+## Quick Start
+
+### Requirements
+
+- Go 1.25+
+- Node.js 22.17+
+- Python 3.8+ and OpenSSH for the offline deployment tools
+
+### Build and run on Windows
+
+Run from the project root:
 
 ```powershell
 powershell -File scripts/update-manager-local.ps1
 ```
 
-打开 <http://127.0.0.1:8787>。已有账号可直接登录。注册新账号时，在本机项目根目录为受邀账号签发邀请码：
+Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Existing users can sign in directly. To register a new user, issue an invitation for that account from the local project root:
 
 ```powershell
-.\downloads\hifi-manager.exe -home .\downloads\manager-local -invite 受邀账号
+.\downloads\hifi-manager.exe -home .\downloads\manager-local -invite invited-account
 ```
 
-从登录页点击「注册」，输入邀请码、签发时指定的账号和自设密码。邀请码 30 分钟内有效，只能使用一次。登录后可在首页选择系统已挂载的 USB 数据盘。初始化需要明确确认，不格式化磁盘，也不清理盘内其他目录。
+Choose **注册** (Register) on the sign-in page, then enter the invitation, the account it was issued for, and a password of your choice. Invitations expire after 30 minutes and can be used once.
 
-在首页点击「WebDAV 连接」，把显示的地址、用户名和访问密码填入支持 WebDAV 的播放器。浏览器仍可在曲库页面直接试听。
+After signing in, select a USB data disk that is already mounted by the operating system in the home-page settings. Initialization requires explicit confirmation; it does not format the disk or remove other directories.
 
-仅构建、不启动服务：
+Choose **WebDAV 连接** (WebDAV connection) on the home page and enter the displayed address, username, and access password in a compatible player. You can also preview tracks directly in the browser.
+
+To build without starting the service:
 
 ```powershell
 powershell -File scripts/build-manager.ps1 -OutputDirectory downloads/manager-build
 ```
 
-Linux 或其他开发环境的直接启动方式见[开发指南](docs/DEVELOPMENT.md)。默认仅监听回环地址，局域网管理需要显式配置可信网段和 HTTPS。
+See the [Development guide](./docs/DEVELOPMENT.md) for Linux and other development environments. The service listens on loopback by default; LAN management requires an explicit trusted subnet configuration and HTTPS.
 
-## 设备部署
+## Device Deployment
 
-目标支持 Linux ARM64 和 x86_64，使用 systemd 用户服务和系统挂载的可写 USB 音乐盘。
+Linux ARM64 and x86_64 targets use systemd user services and a writable USB music disk mounted by the operating system.
+
+Copy [example.json](./config/devices/example.json) to a local `config/devices/local.json` and fill in your device settings. Then run:
 
 ```console
 python deployment/deploy.py --build arm64
@@ -53,30 +115,34 @@ python deployment/deploy.py --device config/devices/local.json --check
 python deployment/deploy.py --device config/devices/local.json --apply
 ```
 
-将 [example.json](config/devices/example.json) 复制为本机的 `local.json` 并填写设备配置。完整步骤见[部署指南](deployment/README.md)。构建不会连接设备；更新保留既有数据、配置和身份。
+See the [Deployment guide](./deployment/README.md) for the full procedure. Building does not connect to a device, and updates preserve existing data, configuration, and identities.
 
-Nano 可通过同一条 ChmlFrp HTTPS 隧道提供公网管理 Web 和 WebDAV。见[公网部署与验收](deployment/CHMLFRP.md)。
+A Nano deployment can serve the management UI and WebDAV through one ChmlFrp HTTPS tunnel. See [Public access and verification](./deployment/CHMLFRP.md).
 
-## 项目结构
+## Project Structure
 
-| 路径 | 职责 |
+| Directory | Description |
 | --- | --- |
-| `manager-service/` | Go 管理 API、React/MUI 前端、WebDAV 和音源分析 |
-| `shared-library/` | 资源格式、盘身份和安全文件访问 |
-| `deployment/` | 离线构建、预检、安装与失败回退 |
-| `scripts/` | 本机启动、构建与更新 |
-| `docs/` | 开发、接口与数据规则 |
-| `config/devices/` | 通用配置示例；个人设备配置不入库 |
+| [`manager-service/`](./manager-service) | Go management API, React/MUI frontend, WebDAV, and audio analysis |
+| [`shared-library/`](./shared-library) | Resource formats, disk identities, and safe file access |
+| [`deployment/`](./deployment) | Offline builds, preflight checks, installation, and failure rollback |
+| [`scripts/`](./scripts) | Local startup, build, and update tools |
+| [`docs/`](./docs) | Development, API, and data rules |
+| [`config/devices/`](./config/devices) | Generic device example; personal device configurations are ignored by Git |
 
-`downloads/`、`diagnostics/`、`secrets/` 是本机目录，不进入仓库。
+`downloads/`, `diagnostics/`, and `secrets/` are local directories excluded from the repository.
 
-## 文档与贡献
+## Documentation and Contributing
 
-- [系统架构](ARCHITECTURE.md)
-- [开发与测试](docs/DEVELOPMENT.md)
-- [管理 API](docs/MANAGEMENT-API.md)
-- [存储与操作](docs/STORAGE.md)
-- [贡献约定](CONTRIBUTING.md) · [安全说明](SECURITY.md)
-- [第三方来源与许可](NOTICE.md)
+The detailed technical guides are currently in Simplified Chinese:
 
-项目暂未指定自有代码许可；第三方代码、字体、图标及音源分析代码保留各自许可。
+- [Architecture](./ARCHITECTURE.md)
+- [Development and testing](./docs/DEVELOPMENT.md)
+- [Management API](./docs/MANAGEMENT-API.md)
+- [Storage and operations](./docs/STORAGE.md)
+- [Contribution guidelines](./CONTRIBUTING.md) · [Security](./SECURITY.md)
+- [Third-party sources and licenses](./NOTICE.md)
+
+## License
+
+The project has not yet specified a license for its own code. Third-party code, fonts, icons, and audio-analysis components retain their respective licenses; see [NOTICE.md](./NOTICE.md).
